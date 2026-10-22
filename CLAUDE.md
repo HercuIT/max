@@ -9,7 +9,8 @@ Guidance for Claude Code when working in this repository.
 ## Key files
 
 - `index.ts` — the entire Worker (routing, auth, OTLP parsing, Supabase insert). This is currently the only source file.
-- `schema.sql` — Supabase schema (`projects`, `token_usage_logs`, `project_spend_summary` view). Treat this as the source of truth for the DB shape; if `index.ts` inserts a field, it should exist here.
+- `supabase/migrations/` — imperative migration history (`projects`, `token_usage_logs`, `project_spend_summary` view). This is the source of truth for the DB shape; if `index.ts` inserts a field, it should exist here. Don't hand-edit old migration files — add a new one with `supabase migration new <name>`.
+- `.github/workflows/deploy-migrations.yml` — CI job that runs `supabase link` + `supabase db push` on pushes to `main` that touch `supabase/migrations/**`. Needs `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_ID`, `SUPABASE_DB_PASSWORD` as repo secrets.
 - `wrangler.toml` — Worker name/entry/compatibility date only. Secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `INGEST_SECRET_TOKEN`) are configured via `wrangler secret put`, not in this file.
 
 ## Working in this repo
