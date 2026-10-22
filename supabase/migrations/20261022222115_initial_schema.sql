@@ -22,7 +22,9 @@ CREATE TABLE IF NOT EXISTS public.token_usage_logs (
 CREATE INDEX IF NOT EXISTS idx_token_usage_logs_project_name ON public.token_usage_logs(project_name);
 CREATE INDEX IF NOT EXISTS idx_token_usage_logs_recorded_at ON public.token_usage_logs(recorded_at DESC);
 
-CREATE OR REPLACE VIEW public.project_spend_summary AS
+CREATE OR REPLACE VIEW public.project_spend_summary
+    WITH (security_invoker = true)
+AS
 SELECT
     project_name,
     COALESCE(SUM(input_tokens), 0)::BIGINT AS total_input_tokens,
