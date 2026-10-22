@@ -17,10 +17,18 @@ Authorization: Bearer <INGEST_SECRET_TOKEN>
 ```
 Requests that aren't `POST`, aren't JSON, or don't match a known path return `405`/`404`/`401` as appropriate.
 
+- `GET /dashboard/token-usage` — serves the token usage dashboard page (HTML). Requires HTTP Basic Auth (`DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD`).
+- `GET /api/token-usage/projects` — distinct project names. Basic Auth required.
+- `GET /api/token-usage/series?projects=a,b&start=<ISO>&end=<ISO>&bucket=hour|day|week` — time-bucketed token sums (summed across the selected projects, or all projects if omitted). Basic Auth required.
+- `GET /api/token-usage/table?projects=a,b&start=<ISO>&end=<ISO>` — per-project token/session summary for the range. Basic Auth required.
+
+See `specs/token-usage-dashboard.md` for the full spec these implement.
+
 ## Project layout
 
-- `index.ts` — Worker entrypoint: auth check, OTLP payload parsing, Supabase insert.
-- `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, and a `project_spend_summary` view (per-project token/cost rollups).
+- `index.ts` — Worker entrypoint: routing, ingest auth/parsing, dashboard Basic Auth, dashboard API handlers.
+- `dashboard.ts` — static HTML/CSS/JS for the token usage dashboard page (Chart.js via CDN), served by `index.ts`.
+- `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
 - `.github/workflows/deploy-migrations.yml` — pushes pending migrations in `supabase/migrations/` to the linked Supabase project whenever they change on `main`.
 
@@ -41,6 +49,8 @@ Requests that aren't `POST`, aren't JSON, or don't match a known path return `40
    npx wrangler secret put SUPABASE_URL
    npx wrangler secret put SUPABASE_SERVICE_ROLE_KEY
    npx wrangler secret put INGEST_SECRET_TOKEN
+   npx wrangler secret put DASHBOARD_USERNAME
+   npx wrangler secret put DASHBOARD_PASSWORD
    ```
 4. Deploy:
    ```
@@ -79,3 +89,13 @@ npx supabase migration new <name>
 # edit the generated supabase/migrations/<timestamp>_<name>.sql
 ```
 Commit the generated file — CI applies whatever is new in `supabase/migrations/` on merge to `main`.
+
+## CI: setting dashboard credentials
+
+`.github/workflows/set-dashboard-credentials.yml` is manual-only (`workflow_dispatch`) — it pushes `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` to the Worker via `wrangler secret put`, reading the values from GitHub Actions secrets so they never appear in the workflow file or logs. It requires these repo secrets:
+
+- `CLOUDFLARE_API_TOKEN` — a token with permission to edit secrets for this Worker.
+- `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID.
+- `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` — the credentials to push. There is no default; both must be set before running the workflow.
+
+Run it from the Actions tab whenever you need to set or rotate the dashboard's Basic Auth credentials.
