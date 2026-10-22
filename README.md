@@ -31,6 +31,7 @@ See `specs/token-usage-dashboard.md` for the full spec these implement.
 - `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
 - `.github/workflows/deploy-migrations.yml` — pushes pending migrations in `supabase/migrations/` to the linked Supabase project whenever they change on `main`.
+- `.github/workflows/deploy-worker.yml` — runs `wrangler deploy` whenever `index.ts`, `dashboard.ts`, `wrangler.toml`, or the lockfile change on `main` (or on manual dispatch). This is what actually puts Worker code changes live — committing them alone does not deploy.
 
 ## Setup
 
@@ -89,6 +90,15 @@ npx supabase migration new <name>
 # edit the generated supabase/migrations/<timestamp>_<name>.sql
 ```
 Commit the generated file — CI applies whatever is new in `supabase/migrations/` on merge to `main`.
+
+## CI: deploying the Worker
+
+`.github/workflows/deploy-worker.yml` runs `wrangler deploy` on pushes to `main` that touch `index.ts`, `dashboard.ts`, `wrangler.toml`, or `package-lock.json` (or on manual dispatch). It requires:
+
+- `CLOUDFLARE_API_TOKEN` — a token with permission to deploy this Worker.
+- `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID.
+
+(Same two secrets as `set-dashboard-credentials.yml`, if you've already added those.) Without this workflow having run at least once, code changes to `index.ts`/`dashboard.ts` only exist in the repo — the live Worker keeps serving whatever was last deployed.
 
 ## CI: setting dashboard credentials
 
