@@ -8,7 +8,7 @@ Claude Code can export usage telemetry (tokens, cost, sessions) via OTLP. This w
 
 ## Endpoints
 
-- `POST /v1/metrics` — accepts an OTLP metrics payload, extracts token/cost data points, and inserts rows into `token_usage_logs`.
+- `POST /v1/metrics` — accepts an OTLP metrics payload and inserts rows into `token_usage_logs`. Matches on the exact metric name (`claude_code.token.usage`, `claude_code.cost.usage`); for token usage, reads the `type` attribute (`input`/`output`/`cacheRead`/`cacheCreation`) off each data point rather than off the metric name, since Claude Code doesn't send a separate metric name per token type. Every inserted row currently hardcodes `model` to `'claude-3-5-sonnet'` regardless of the model actually used — a known simplification, not yet wired up to real model data.
 - `POST /v1/logs` — accepts an OTLP logs payload and acknowledges it (not persisted).
 
 Both endpoints require:
@@ -28,6 +28,7 @@ See `specs/token-usage-dashboard.md` for the full spec these implement.
 
 - `index.ts` — Worker entrypoint: routing, ingest auth/parsing, dashboard Basic Auth, dashboard API handlers.
 - `dashboard.ts` — static HTML/CSS/JS for the token usage dashboard page (Chart.js via CDN), served by `index.ts`.
+- `specs/` — dashboard specs (e.g. `token-usage-dashboard.md`) written before implementation. Check here first before changing dashboard behavior — it's the intended design, not just a description of what exists.
 - `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
 - `index.test.ts` / `vitest.config.ts` — unit tests for `index.ts` (ingest parsing/auth, dashboard API routing) and their coverage config.
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
@@ -129,6 +130,34 @@ npm test
 ```
 
 Runs the `index.ts` unit suite (`index.test.ts`) with `vitest` + `@cloudflare/vitest-plugin` (handlers execute in a real `workerd` isolate) and Istanbul coverage, enforcing a 90% floor on statements/branches/functions/lines. `@supabase/supabase-js` is mocked, so no real network calls or secrets are needed to run it. `dashboard.ts` is excluded from the coverage run — it's a plain-JS-in-a-template-string HTML page with no bundler and no Workers-side logic to unit test (see `CLAUDE.md`).
+
+After touching `index.ts` or `dashboard.ts`, also run:
+```
+npx tsc --noEmit          # type-check
+npx wrangler deploy --dry-run   # bundles without deploying
+```
+
+## Local development
+
+```
+npx wrangler dev
+```
+
+This needs the same secrets as production (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `INGEST_SECRET_TOKEN`, `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`) available locally — e.g. via `.dev.vars` (gitignored) — and a real Supabase connection with the `get_token_usage_*` functions migrated in; there's no mock data path for manual local testing (the automated test suite above mocks Supabase instead).
+
+With `wrangler dev` running:
+```
+curl -X POST http://localhost:8787/v1/metrics \
+  -H "Authorization: Bearer <INGEST_SECRET_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"resourceMetrics": []}'
+
+curl -X POST http://localhost:8787/v1/logs \
+  -H "Authorization: Bearer <INGEST_SECRET_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+Or open `http://localhost:8787/dashboard/token-usage` in a browser and enter `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` at the Basic Auth prompt.
 
 ## CI: setting dashboard credentials
 
