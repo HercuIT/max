@@ -29,6 +29,7 @@ See `specs/token-usage-dashboard.md` for the full spec these implement.
 - `index.ts` — Worker entrypoint: routing, ingest auth/parsing, dashboard Basic Auth, dashboard API handlers.
 - `dashboard.ts` — static HTML/CSS/JS for the token usage dashboard page (Chart.js via CDN), served by `index.ts`.
 - `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
+- `index.test.ts` / `vitest.config.ts` — unit tests for `index.ts` (ingest parsing/auth, dashboard API routing) and their coverage config.
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
 - `.github/workflows/deploy-migrations.yml` — pushes pending migrations in `supabase/migrations/` to the linked Supabase project whenever they change on `main`.
 - `.github/workflows/deploy-worker.yml` — runs `wrangler deploy` whenever `index.ts`, `dashboard.ts`, `wrangler.toml`, or the lockfile change on `main` (or on manual dispatch). This is what actually puts Worker code changes live — committing them alone does not deploy.
@@ -76,6 +77,18 @@ In Claude Code's settings (e.g. `.claude/settings.json`), configure the OTLP exp
 
 **Never commit a real token in this file.** Keep secrets out of version control — use a local, gitignored settings file or a secrets manager instead.
 
+### Getting per-project data on the dashboard
+
+`index.ts` resolves each row's project name from the `vcs.repository.name` resource attribute (falling back to `project.name`, then `service.name`, then `'default-project'`). `vcs.repository.name` is only sent when:
+
+- The Claude Code CLI is v2.1.269 or later, **and**
+- `OTEL_METRICS_INCLUDE_REPOSITORY=true` is set (default `false`), **and**
+- The session's working directory is a git repository with a URL-shaped `origin` remote (it's omitted if there's no `origin` remote, the remote isn't URL-shaped, or the only enclosing repo is your home directory).
+
+So each project repo's `.claude/settings.json` needs both the OTLP exporter env vars above **and** `"OTEL_METRICS_INCLUDE_REPOSITORY": "true"` for it to show up as its own project rather than collapsing into `default-project`.
+
+Also note: the metrics exporter flushes periodically, not instantly — the interval is `OTEL_METRIC_EXPORT_INTERVAL` (default `60000`ms). Give it at least one interval before concluding ingestion is broken.
+
 ## CI: migration deploys
 
 `.github/workflows/deploy-migrations.yml` runs `supabase db push` against the linked project whenever a push to `main` touches `supabase/migrations/**` (or is triggered manually). It requires these repo secrets:
@@ -99,6 +112,14 @@ Commit the generated file — CI applies whatever is new in `supabase/migrations
 - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID.
 
 (Same two secrets as `set-dashboard-credentials.yml`, if you've already added those.) Without this workflow having run at least once, code changes to `index.ts`/`dashboard.ts` only exist in the repo — the live Worker keeps serving whatever was last deployed.
+
+## Testing
+
+```
+npm test
+```
+
+Runs the `index.ts` unit suite (`index.test.ts`) with `vitest` + `@cloudflare/vitest-plugin` (handlers execute in a real `workerd` isolate) and Istanbul coverage, enforcing a 90% floor on statements/branches/functions/lines. `@supabase/supabase-js` is mocked, so no real network calls or secrets are needed to run it. `dashboard.ts` is excluded from the coverage run — it's a plain-JS-in-a-template-string HTML page with no bundler and no Workers-side logic to unit test (see `CLAUDE.md`).
 
 ## CI: setting dashboard credentials
 
