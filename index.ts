@@ -119,6 +119,10 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
                             findAttr(resAttrs, 'project.name') ??
                             findAttr(resAttrs, 'service.name') ??
                             'default-project';
+                        // host.name/user.email aren't reliably confirmed on one location yet
+                        // (see specs/machine-and-user-attribution.md) — check both the
+                        // data point and the resource block until that's verified against a
+                        // real payload.
                         const record = {
                             project_name: projectName,
                             session_id: findAttr(dp.attributes, 'session.id') || 'active_session',
@@ -128,6 +132,8 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
                             cache_read_tokens: 0,
                             cache_write_tokens: 0,
                             total_cost_usd: 0,
+                            host_name: findAttr(dp.attributes, 'host.name') ?? findAttr(resAttrs, 'host.name') ?? null,
+                            user_email: findAttr(dp.attributes, 'user.email') ?? findAttr(resAttrs, 'user.email') ?? null,
                         };
 
                         if (metric.name === 'claude_code.token.usage') {

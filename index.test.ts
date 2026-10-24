@@ -338,6 +338,8 @@ describe('handleIngest', () => {
             cache_read_tokens: 0,
             cache_write_tokens: 0,
             total_cost_usd: 0,
+            host_name: null,
+            user_email: null,
         });
         expect(records[1]).toMatchObject({ output_tokens: 20, session_id: 'active_session' });
         expect(records[2]).toMatchObject({ cache_read_tokens: 30 });
@@ -403,6 +405,88 @@ describe('handleIngest', () => {
         });
         await handleIngest(req, testEnv, url);
         expect(insert.mock.calls[0][0][0].project_name).toBe('default-project');
+    });
+
+    it('records host_name and user_email from resource attributes when present', async () => {
+        const payload = {
+            resourceMetrics: [
+                {
+                    resource: {
+                        attributes: [
+                            { key: 'host.name', value: { stringValue: 'build-7' } },
+                            { key: 'user.email', value: { stringValue: 'dev@example.com' } },
+                        ],
+                    },
+                    scopeMetrics: [
+                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
+                    ],
+                },
+            ],
+        };
+        const req = new Request('https://x/v1/metrics', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(payload),
+        });
+        await handleIngest(req, testEnv, url);
+        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: 'build-7', user_email: 'dev@example.com' });
+    });
+
+    it('records host_name and user_email from data-point attributes when present there instead', async () => {
+        const payload = {
+            resourceMetrics: [
+                {
+                    resource: { attributes: [] },
+                    scopeMetrics: [
+                        {
+                            metrics: [
+                                {
+                                    name: 'claude_code.cost.usage',
+                                    sum: {
+                                        dataPoints: [
+                                            {
+                                                asDouble: 1,
+                                                attributes: [
+                                                    { key: 'host.name', value: { stringValue: 'laptop-2' } },
+                                                    { key: 'user.email', value: { stringValue: 'other@example.com' } },
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                },
+                            ],
+                        },
+                    ],
+                },
+            ],
+        };
+        const req = new Request('https://x/v1/metrics', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(payload),
+        });
+        await handleIngest(req, testEnv, url);
+        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: 'laptop-2', user_email: 'other@example.com' });
+    });
+
+    it('sets host_name and user_email to null when neither attribute is present anywhere', async () => {
+        const payload = {
+            resourceMetrics: [
+                {
+                    resource: { attributes: [] },
+                    scopeMetrics: [
+                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
+                    ],
+                },
+            ],
+        };
+        const req = new Request('https://x/v1/metrics', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(payload),
+        });
+        await handleIngest(req, testEnv, url);
+        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: null, user_email: null });
     });
 
     it('reads gauge data points when sum is absent', async () => {
