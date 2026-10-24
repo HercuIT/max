@@ -1,6 +1,6 @@
 # HercuIT Burnrate
 
-A Cloudflare Worker (`hercuit-burnrate`) that receives Claude Code's OpenTelemetry (OTLP) metrics/logs export and writes token usage and cost data into Supabase. This repo's directory is still named `max`.
+A Cloudflare Worker (`claude-code-telemetry-ingest`) that receives Claude Code's OpenTelemetry (OTLP) metrics/logs export and writes token usage and cost data into Supabase. This repo's directory is still named `max`.
 
 ## What it does
 
@@ -33,7 +33,7 @@ See `specs/token-usage-dashboard.md` for the full spec these implement.
 - `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
 - `index.test.ts` / `vitest.config.ts` — unit tests for `index.ts` (ingest parsing/auth, dashboard API routing) and their coverage config.
 - `assets.ts` — base64-encoded favicon files served at `/favicon.*`, `/favicon-*.png`, `/apple-touch-icon.png` (see `specs/branding-theme.md`).
-- `wrangler.toml` — Cloudflare Worker config (name: `hercuit-burnrate`).
+- `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
 - `.github/workflows/deploy-migrations.yml` — pushes pending migrations in `supabase/migrations/` to the linked Supabase project whenever they change on `main`.
 - `.github/workflows/deploy-worker.yml` — runs `wrangler deploy` whenever `index.ts`, `dashboard.ts`, `wrangler.toml`, or the lockfile change on `main` (or on manual dispatch). This is what actually puts Worker code changes live — committing them alone does not deploy.
 

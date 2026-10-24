@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-**HercuIT Burnrate** (Worker name: `hercuit-burnrate`; this repo's directory is still named `max`) is a small Cloudflare Worker that ingests Claude Code's OTLP telemetry export (metrics + logs) and writes token usage/cost rows into Supabase. See `README.md` for the full description, endpoints, and setup/deploy steps.
+**HercuIT Burnrate** (Worker name: `claude-code-telemetry-ingest`; this repo's directory is still named `max`) is a small Cloudflare Worker that ingests Claude Code's OTLP telemetry export (metrics + logs) and writes token usage/cost rows into Supabase. See `README.md` for the full description, endpoints, and setup/deploy steps.
 
 ## Key files
 
