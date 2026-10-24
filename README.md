@@ -21,16 +21,18 @@ Requests that aren't `POST`, aren't JSON, or don't match a known path return `40
 - `GET /api/token-usage/projects` — distinct project names. Basic Auth required.
 - `GET /api/token-usage/series?projects=a,b&start=<ISO>&end=<ISO>&bucket=hour|day|week` — time-bucketed token sums (summed across the selected projects, or all projects if omitted). Basic Auth required.
 - `GET /api/token-usage/table?projects=a,b&start=<ISO>&end=<ISO>` — per-project token/session summary for the range. Basic Auth required.
+- `GET /api/cost/table?projects=a,b&start=<ISO>&end=<ISO>` — per-project cost/token summary for the range (all-time if `start`/`end` are omitted). Basic Auth required.
+- `GET /api/cost/series?projects=a,b&start=<ISO>&end=<ISO>&bucket=hour|day|week` — per-project cost time series (per-bucket and cumulative), backing the Cost (USD) tab's trend view. Basic Auth required.
 - `GET /favicon.ico`, `/favicon.svg`, `/favicon-{16,32,192,512}.png`, `/apple-touch-icon.png` — static brand assets (see `specs/branding-theme.md`). Unauthenticated, like any site's favicon.
 
-See `specs/token-usage-dashboard.md` for the full spec these implement.
+See `specs/token-usage-dashboard.md` and `specs/usd-per-project-dashboard.md` for the full specs these implement.
 
 ## Project layout
 
 - `index.ts` — Worker entrypoint: routing, ingest auth/parsing, dashboard Basic Auth, dashboard API handlers.
 - `dashboard.ts` — static HTML/CSS/JS for the token usage dashboard page (Chart.js via CDN), served by `index.ts`.
 - `specs/` — dashboard specs (e.g. `token-usage-dashboard.md`) written before implementation. Check here first before changing dashboard behavior — it's the intended design, not just a description of what exists.
-- `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view, and the `get_token_usage_*` functions backing the dashboard API (service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
+- `supabase/migrations/` — Supabase schema migrations: `projects`, `token_usage_logs`, `project_spend_summary` view (access-controlled but unused by any code path), the `get_token_usage_*` functions backing the token-usage tab, and `get_cost_table`/`get_cost_series` backing the Cost (USD) tab (all service_role-only — EXECUTE is revoked from `anon`/`authenticated`).
 - `index.test.ts` / `vitest.config.ts` — unit tests for `index.ts` (ingest parsing/auth, dashboard API routing) and their coverage config.
 - `assets.ts` — base64-encoded favicon files served at `/favicon.*`, `/favicon-*.png`, `/apple-touch-icon.png` (see `specs/branding-theme.md`).
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
@@ -99,9 +101,13 @@ If you only want a specific other project to opt out of reporting here, set `OTE
 
 `project.name` reflects the session's custom name (set via `/rename`) if one was given — it is *not* derived from the repo or folder. A session with no custom name, and no working `vcs.repository.name`, falls through to the fixed literal `service.name` value `claude-code`, which is why several unrelated sessions can appear to pile up under one generic bucket.
 
-So each project repo's `.claude/settings.json` needs both the OTLP exporter env vars above **and** `"OTEL_METRICS_INCLUDE_REPOSITORY": "true"` for it to show up as its own project rather than collapsing into `default-project`.
+So your user settings (or shell env/managed settings — see above, **not** a project's `.claude/settings.json`) need both the OTLP exporter env vars above **and** `"OTEL_METRICS_INCLUDE_REPOSITORY": "true"` for a project to show up as itself rather than collapsing into `default-project`.
 
 Also note: the metrics exporter flushes periodically, not instantly — the interval is `OTEL_METRIC_EXPORT_INTERVAL` (default `60000`ms). Give it at least one interval before concluding ingestion is broken.
+
+### Dashboard tabs
+
+`/dashboard/token-usage` has two tabs sharing one filter bar: **Token Usage** (default, last 7 days) and **Cost (USD)** (defaults to all-time — clearing the date range switches back to all-time; the project multi-select is shared between both tabs). Each tab remembers its own date range independently, so switching tabs doesn't clobber the other tab's custom range. See `specs/usd-per-project-dashboard.md`.
 
 ## CI: migration deploys
 
