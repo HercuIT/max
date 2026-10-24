@@ -12,7 +12,7 @@ export interface Env {
 const ALLOWED_BUCKETS = ['hour', 'day', 'week'] as const;
 type Bucket = (typeof ALLOWED_BUCKETS)[number];
 
-function isDashboardAuthorized(request: Request, env: Env): boolean {
+export function isDashboardAuthorized(request: Request, env: Env): boolean {
     const header = request.headers.get('Authorization');
     if (!header || !header.startsWith('Basic ')) return false;
 
@@ -31,33 +31,37 @@ function isDashboardAuthorized(request: Request, env: Env): boolean {
     return user === env.DASHBOARD_USERNAME && pass === env.DASHBOARD_PASSWORD;
 }
 
-function unauthorizedResponse(): Response {
+export function unauthorizedResponse(): Response {
     return new Response('Unauthorized', {
         status: 401,
         headers: { 'WWW-Authenticate': 'Basic realm="token-usage-dashboard"' },
     });
 }
 
-function jsonResponse(body: unknown, status = 200): Response {
+export function jsonResponse(body: unknown, status = 200): Response {
     return new Response(JSON.stringify(body), {
         status,
         headers: { 'content-type': 'application/json' },
     });
 }
 
-function parseProjectsParam(url: URL): string[] | null {
+export function parseProjectsParam(url: URL): string[] | null {
     const raw = url.searchParams.get('projects');
     if (!raw) return null;
     const projects = raw.split(',').map((p) => p.trim()).filter(Boolean);
     return projects.length > 0 ? projects : null;
 }
 
-function parseBucketParam(url: URL): Bucket {
+export function parseBucketParam(url: URL): Bucket {
     const raw = url.searchParams.get('bucket');
     return (ALLOWED_BUCKETS as readonly string[]).includes(raw ?? '') ? (raw as Bucket) : 'day';
 }
 
-async function handleIngest(request: Request, env: Env, url: URL): Promise<Response> {
+export function findAttr(attrs: any[] | undefined, key: string): string | undefined {
+    return attrs?.find((a) => a.key === key)?.value?.stringValue;
+}
+
+export async function handleIngest(request: Request, env: Env, url: URL): Promise<Response> {
     if (request.method !== 'POST') {
         return jsonResponse({ error: 'Method Not Allowed' }, 405);
     }
@@ -77,9 +81,6 @@ async function handleIngest(request: Request, env: Env, url: URL): Promise<Respo
         const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
             auth: { persistSession: false },
         });
-
-        const findAttr = (attrs: any[] | undefined, key: string): string | undefined =>
-            attrs?.find((a) => a.key === key)?.value?.stringValue;
 
         const recordsToInsert = [];
         const resourceMetrics = payload.resourceMetrics || [];
@@ -138,7 +139,7 @@ async function handleIngest(request: Request, env: Env, url: URL): Promise<Respo
     }
 }
 
-async function handleTokenUsageApi(request: Request, env: Env, url: URL): Promise<Response> {
+export async function handleTokenUsageApi(request: Request, env: Env, url: URL): Promise<Response> {
     const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
         auth: { persistSession: false },
     });
