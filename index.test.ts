@@ -57,6 +57,10 @@ describe('parseProjectsParam', () => {
     it('returns a single-element array for one project', () => {
         expect(parseProjectsParam(new URL('https://x/?projects=a'))).toEqual(['a']);
     });
+
+    it('returns null when every entry is empty after trimming', () => {
+        expect(parseProjectsParam(new URL('https://x/?projects=,%20,'))).toBeNull();
+    });
 });
 
 describe('parseBucketParam', () => {
@@ -187,7 +191,8 @@ describe('handleIngest', () => {
         });
         const res = await handleIngest(req, testEnv, url);
         expect(res.status).toBe(500);
-        expect((await res.json()).error).toBeTruthy();
+        const body = (await res.json()) as { error: string };
+        expect(body.error).toBeTruthy();
     });
 
     it('acknowledges /v1/logs without touching the database', async () => {
@@ -426,6 +431,46 @@ describe('handleIngest', () => {
         expect(insert.mock.calls[0][0][0].total_cost_usd).toBe(9.99);
     });
 
+    it('tolerates missing resource/scopeMetrics/metrics/sum|gauge keys at every level without throwing', async () => {
+        const payload = {
+            resourceMetrics: [
+                {}, // no `resource` at all -> falls back to default-project, no scopeMetrics -> no-op
+                { resource: { attributes: [] } }, // no `scopeMetrics` key
+                { resource: { attributes: [] }, scopeMetrics: [{}] }, // scopeMetric with no `metrics` key
+                {
+                    resource: { attributes: [] },
+                    scopeMetrics: [{ metrics: [{ name: 'claude_code.cost.usage' }] }], // metric with neither sum nor gauge
+                },
+            ],
+        };
+        const req = new Request('https://x/v1/metrics', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(payload),
+        });
+        const res = await handleIngest(req, testEnv, url);
+        expect(await res.json()).toEqual({ success: true, count: 0 });
+        expect(insert).not.toHaveBeenCalled();
+    });
+
+    it('defaults the value to 0 when a data point has neither asDouble nor asInt', async () => {
+        const payload = {
+            resourceMetrics: [
+                {
+                    resource: { attributes: [] },
+                    scopeMetrics: [{ metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{}] } }] }],
+                },
+            ],
+        };
+        const req = new Request('https://x/v1/metrics', {
+            method: 'POST',
+            headers: authHeaders,
+            body: JSON.stringify(payload),
+        });
+        await handleIngest(req, testEnv, url);
+        expect(insert.mock.calls[0][0][0].total_cost_usd).toBe(0);
+    });
+
     it('returns 500 when the insert fails', async () => {
         insert.mockResolvedValue({ error: { message: 'db down' } });
         const payload = {
@@ -519,6 +564,30 @@ describe('handleTokenUsageApi', () => {
         expect(res.status).toBe(500);
     });
 
+    it('treats a null (but error-free) projects result as empty', async () => {
+        rpc.mockResolvedValue({ data: null, error: null });
+        const url = new URL('https://x/api/token-usage/projects');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleTokenUsageApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ projects: [] });
+    });
+
+    it('treats a null (but error-free) series result as empty', async () => {
+        rpc.mockResolvedValue({ data: null, error: null });
+        const url = new URL('https://x/api/token-usage/series');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleTokenUsageApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ series: [] });
+    });
+
+    it('treats a null (but error-free) table result as empty', async () => {
+        rpc.mockResolvedValue({ data: null, error: null });
+        const url = new URL('https://x/api/token-usage/table');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleTokenUsageApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ rows: [] });
+    });
+
     it('returns 404 for an unknown token-usage subpath', async () => {
         const url = new URL('https://x/api/token-usage/nope');
         const req = new Request(url, { headers: authHeaders });
@@ -573,6 +642,26 @@ describe('default export fetch routing', () => {
         });
         const res = await worker.fetch(req, testEnv);
         expect(await res.json()).toEqual({ success: true, count: 0 });
+    });
+
+    it('dispatches /v1/logs to the ingest handler', async () => {
+        const req = new Request('https://x/v1/logs', {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${testEnv.INGEST_SECRET_TOKEN}` },
+            body: '{}',
+        });
+        const res = await worker.fetch(req, testEnv);
+        expect(await res.json()).toEqual({ message: 'Logs acknowledged' });
+    });
+
+    it('serves an authorized /api/token-usage/* request end-to-end', async () => {
+        rpc.mockResolvedValue({ data: [{ project_name: 'a' }], error: null });
+        const req = new Request('https://x/api/token-usage/projects', {
+            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
+        });
+        const res = await worker.fetch(req, testEnv);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ projects: ['a'] });
     });
 
     it('returns 404 for an unknown path', async () => {
