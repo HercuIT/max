@@ -279,15 +279,13 @@ describe('handleIngest', () => {
         expect(await res.json()).toEqual({ success: true, count: 0 });
     });
 
-    it('parses all four token types plus cost, resolving project name via vcs.repository.name', async () => {
+    it('parses all four token types plus cost, resolving project name via the data-point-level vcs.repository.name attribute', async () => {
+        const vcsAttr = { key: 'vcs.repository.name', value: { stringValue: 'repo-a' } };
         const payload = {
             resourceMetrics: [
                 {
                     resource: {
-                        attributes: [
-                            { key: 'vcs.repository.name', value: { stringValue: 'repo-a' } },
-                            { key: 'project.name', value: { stringValue: 'should-be-ignored' } },
-                        ],
+                        attributes: [{ key: 'project.name', value: { stringValue: 'should-be-ignored' } }],
                     },
                     scopeMetrics: [
                         {
@@ -299,19 +297,20 @@ describe('handleIngest', () => {
                                             {
                                                 asInt: '10',
                                                 attributes: [
+                                                    vcsAttr,
                                                     { key: 'type', value: { stringValue: 'input' } },
                                                     { key: 'session.id', value: { stringValue: 'sess-1' } },
                                                 ],
                                             },
-                                            { asInt: '20', attributes: [{ key: 'type', value: { stringValue: 'output' } }] },
-                                            { asInt: '30', attributes: [{ key: 'type', value: { stringValue: 'cacheRead' } }] },
-                                            { asInt: '40', attributes: [{ key: 'type', value: { stringValue: 'cacheCreation' } }] },
+                                            { asInt: '20', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'output' } }] },
+                                            { asInt: '30', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'cacheRead' } }] },
+                                            { asInt: '40', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'cacheCreation' } }] },
                                         ],
                                     },
                                 },
                                 {
                                     name: 'claude_code.cost.usage',
-                                    sum: { dataPoints: [{ asDouble: 1.23 }] },
+                                    sum: { dataPoints: [{ asDouble: 1.23, attributes: [vcsAttr] }] },
                                 },
                             ],
                         },

@@ -106,24 +106,19 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
 
         for (const resMetric of resourceMetrics) {
             const resAttrs = resMetric.resource?.attributes || [];
-            const projectName =
-                findAttr(resAttrs, 'vcs.repository.name') ??
-                findAttr(resAttrs, 'project.name') ??
-                findAttr(resAttrs, 'service.name') ??
-                'default-project';
-            console.log('[ingest] resolved projectName', JSON.stringify({
-                projectName,
-                vcsRepositoryName: findAttr(resAttrs, 'vcs.repository.name'),
-                projectNameAttr: findAttr(resAttrs, 'project.name'),
-                serviceName: findAttr(resAttrs, 'service.name'),
-                allResourceAttrKeys: resAttrs.map((a: any) => a.key),
-            }));
 
             for (const scopeMetric of resMetric.scopeMetrics || []) {
                 for (const metric of scopeMetric.metrics || []) {
                     const dps = metric.sum?.dataPoints || metric.gauge?.dataPoints || [];
                     for (const dp of dps) {
                         const val = Number(dp.asDouble ?? dp.asInt ?? 0);
+                        // vcs.repository.name is a data-point-level attribute (like session.id),
+                        // not a resource attribute — unlike project.name/service.name below.
+                        const projectName =
+                            findAttr(dp.attributes, 'vcs.repository.name') ??
+                            findAttr(resAttrs, 'project.name') ??
+                            findAttr(resAttrs, 'service.name') ??
+                            'default-project';
                         const record = {
                             project_name: projectName,
                             session_id: findAttr(dp.attributes, 'session.id') || 'active_session',

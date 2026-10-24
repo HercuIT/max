@@ -91,11 +91,13 @@ If you only want a specific other project to opt out of reporting here, set `OTE
 
 ### Getting per-project data on the dashboard
 
-`index.ts` resolves each row's project name from the `vcs.repository.name` resource attribute (falling back to `project.name`, then `service.name`, then `'default-project'`). `vcs.repository.name` is only sent when:
+`index.ts` resolves each row's project name from `vcs.repository.name` (falling back to the `project.name` resource attribute, then `service.name`, then `'default-project'`). Note that `vcs.repository.name` is a **data-point** attribute, not a resource attribute like the other two — it's only sent when:
 
 - The Claude Code CLI is v2.1.269 or later, **and**
 - `OTEL_METRICS_INCLUDE_REPOSITORY=true` is set (default `false`), **and**
 - The session's working directory is a git repository with a URL-shaped `origin` remote (it's omitted if there's no `origin` remote, the remote isn't URL-shaped, or the only enclosing repo is your home directory).
+
+`project.name` reflects the session's custom name (set via `/rename`) if one was given — it is *not* derived from the repo or folder. A session with no custom name, and no working `vcs.repository.name`, falls through to the fixed literal `service.name` value `claude-code`, which is why several unrelated sessions can appear to pile up under one generic bucket.
 
 So each project repo's `.claude/settings.json` needs both the OTLP exporter env vars above **and** `"OTEL_METRICS_INCLUDE_REPOSITORY": "true"` for it to show up as its own project rather than collapsing into `default-project`.
 
