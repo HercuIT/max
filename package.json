@@ -1,7 +1,7 @@
 {
-  "name": "max",
+  "name": "hercuit-burnrate",
   "version": "1.0.0",
-  "description": "",
+  "description": "HercuIT Burnrate — Claude Code telemetry ingest and token usage dashboard.",
   "type": "module",
   "main": "index.js",
   "scripts": {

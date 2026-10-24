@@ -12,6 +12,7 @@ vi.mock('@supabase/supabase-js', () => ({ createClient }));
 
 import worker, {
     findAttr,
+    handleFaviconAsset,
     handleIngest,
     handleTokenUsageApi,
     isDashboardAuthorized,
@@ -596,6 +597,21 @@ describe('handleTokenUsageApi', () => {
     });
 });
 
+describe('handleFaviconAsset', () => {
+    it('returns null for a path with no matching asset', () => {
+        expect(handleFaviconAsset('/nope.png')).toBeNull();
+    });
+
+    it('serves a known favicon with the right content-type and bytes', async () => {
+        const res = handleFaviconAsset('/favicon.svg');
+        expect(res).not.toBeNull();
+        expect(res!.headers.get('content-type')).toBe('image/svg+xml');
+        expect(res!.headers.get('cache-control')).toContain('max-age');
+        const text = await res!.text();
+        expect(text).toContain('<svg');
+    });
+});
+
 describe('default export fetch routing', () => {
     it('requires Basic Auth on /dashboard/token-usage', async () => {
         const req = new Request('https://x/dashboard/token-usage');
@@ -610,7 +626,7 @@ describe('default export fetch routing', () => {
         const res = await worker.fetch(req, testEnv);
         expect(res.status).toBe(200);
         expect(res.headers.get('content-type')).toContain('text/html');
-        expect(await res.text()).toContain('Token Usage Dashboard');
+        expect(await res.text()).toContain('HercuIT Burnrate');
     });
 
     it('rejects non-GET on /dashboard/token-usage', async () => {
@@ -662,6 +678,13 @@ describe('default export fetch routing', () => {
         const res = await worker.fetch(req, testEnv);
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ projects: ['a'] });
+    });
+
+    it('serves favicon assets without requiring auth', async () => {
+        const req = new Request('https://x/favicon-32.png');
+        const res = await worker.fetch(req, testEnv);
+        expect(res.status).toBe(200);
+        expect(res.headers.get('content-type')).toBe('image/png');
     });
 
     it('returns 404 for an unknown path', async () => {

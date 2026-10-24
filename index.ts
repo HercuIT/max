@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js';
 import { tokenUsageDashboardHtml } from './dashboard';
+import { faviconAssets } from './assets';
 
 export interface Env {
     SUPABASE_URL: string;
@@ -59,6 +60,24 @@ export function parseBucketParam(url: URL): Bucket {
 
 export function findAttr(attrs: any[] | undefined, key: string): string | undefined {
     return attrs?.find((a) => a.key === key)?.value?.stringValue;
+}
+
+function base64ToBytes(base64: string): Uint8Array {
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+}
+
+export function handleFaviconAsset(pathname: string): Response | null {
+    const asset = faviconAssets[pathname];
+    if (!asset) return null;
+    return new Response(base64ToBytes(asset.base64).buffer as ArrayBuffer, {
+        headers: {
+            'content-type': asset.contentType,
+            'cache-control': 'public, max-age=86400',
+        },
+    });
 }
 
 export async function handleIngest(request: Request, env: Env, url: URL): Promise<Response> {
@@ -185,6 +204,9 @@ export default {
         if (url.pathname === '/v1/metrics' || url.pathname === '/v1/logs') {
             return handleIngest(request, env, url);
         }
+
+        const faviconResponse = handleFaviconAsset(url.pathname);
+        if (faviconResponse) return faviconResponse;
 
         if (url.pathname === '/dashboard/token-usage') {
             if (request.method !== 'GET') {

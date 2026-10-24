@@ -4,7 +4,7 @@ Guidance for Claude Code when working in this repository.
 
 ## What this is
 
-`max` is a small Cloudflare Worker (`claude-code-telemetry-ingest`) that ingests Claude Code's OTLP telemetry export (metrics + logs) and writes token usage/cost rows into Supabase. See `README.md` for the full description, endpoints, and setup/deploy steps.
+**HercuIT Burnrate** (Worker name: `hercuit-burnrate`; this repo's directory is still named `max`) is a small Cloudflare Worker that ingests Claude Code's OTLP telemetry export (metrics + logs) and writes token usage/cost rows into Supabase. See `README.md` for the full description, endpoints, and setup/deploy steps.
 
 ## Key files
 
@@ -12,6 +12,7 @@ Guidance for Claude Code when working in this repository.
 - `dashboard.ts` — the token usage dashboard page as a single exported HTML string (`tokenUsageDashboardHtml`), served as-is by `index.ts`. Chart.js is loaded from cdnjs; there's no bundler step for this file, so keep it plain JS inside the template string (no TS syntax, no imports).
 - `specs/` — dashboard specs (e.g. `token-usage-dashboard.md`) written before implementation. Check here first before changing dashboard behavior — it's the intended design, not just a description of what exists.
 - `index.test.ts` / `vitest.config.ts` — the `index.ts` unit test suite and its coverage config (90% floor, Istanbul provider). See "Testing / running" below.
+- `assets.ts` — base64-encoded favicon files (generated from `specs/branding-theme.md`'s brand kit), served directly by `index.ts`'s `handleFaviconAsset` with no static-asset binding. Regenerate rather than hand-edit if the brand assets change.
 - `supabase/migrations/` — imperative migration history: `projects`, `token_usage_logs`, `project_spend_summary` view, and `get_token_usage_projects`/`get_token_usage_series`/`get_token_usage_table` (the dashboard's read functions). This is the source of truth for the DB shape; if `index.ts` inserts or queries a field, it should exist here. Don't hand-edit old migration files — add a new one with `supabase migration new <name>`.
 - `.github/workflows/deploy-migrations.yml` — CI job that runs `supabase link` + `supabase db push` on pushes to `main` that touch `supabase/migrations/**`. Needs `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_ID`, `SUPABASE_DB_PASSWORD` as repo secrets.
 - `.github/workflows/deploy-worker.yml` — CI job that runs `wrangler deploy` on pushes to `main` touching `index.ts`/`dashboard.ts`/`wrangler.toml`/the lockfile. Needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. **Editing `index.ts`/`dashboard.ts` and committing is not enough to change the live Worker** — this workflow (or a manual `wrangler deploy`) has to actually run.
