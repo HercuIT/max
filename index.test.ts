@@ -12,6 +12,7 @@ vi.mock('@supabase/supabase-js', () => ({ createClient }));
 
 import worker, {
     findAttr,
+    handleCostApi,
     handleFaviconAsset,
     handleIngest,
     handleTokenUsageApi,
@@ -596,6 +597,84 @@ describe('handleTokenUsageApi', () => {
     });
 });
 
+describe('handleCostApi', () => {
+    const authHeaders = { Authorization: basicAuthHeader(testEnv.DASHBOARD_USERNAME, testEnv.DASHBOARD_PASSWORD) };
+
+    it('returns table rows from the cost RPC', async () => {
+        rpc.mockResolvedValue({ data: [{ project_name: 'a', total_cost_usd: 1.5 }], error: null });
+        const url = new URL('https://x/api/cost/table');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ rows: [{ project_name: 'a', total_cost_usd: 1.5 }] });
+    });
+
+    it('returns 500 when the cost table RPC errors', async () => {
+        rpc.mockResolvedValue({ data: null, error: { message: 'boom' } });
+        const url = new URL('https://x/api/cost/table');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: 'boom' });
+    });
+
+    it('treats a null (but error-free) cost table result as empty', async () => {
+        rpc.mockResolvedValue({ data: null, error: null });
+        const url = new URL('https://x/api/cost/table');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ rows: [] });
+    });
+
+    it('passes parsed filters through to the cost series RPC', async () => {
+        rpc.mockResolvedValue({ data: [{ project_name: 'a', bucket: '2026-01-01', cost_usd: 1 }], error: null });
+        const url = new URL('https://x/api/cost/series?projects=a,b&start=2026-01-01&end=2026-01-02&bucket=hour');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(rpc).toHaveBeenCalledWith('get_cost_series', {
+            p_projects: ['a', 'b'],
+            p_start: '2026-01-01',
+            p_end: '2026-01-02',
+            p_bucket: 'hour',
+        });
+        expect(await res.json()).toEqual({ series: [{ project_name: 'a', bucket: '2026-01-01', cost_usd: 1 }] });
+    });
+
+    it('defaults the cost series bucket to day and projects/start/end to null/undefined when omitted', async () => {
+        const url = new URL('https://x/api/cost/series');
+        const req = new Request(url, { headers: authHeaders });
+        await handleCostApi(req, testEnv, url);
+        expect(rpc).toHaveBeenCalledWith('get_cost_series', {
+            p_projects: null,
+            p_start: undefined,
+            p_end: undefined,
+            p_bucket: 'day',
+        });
+    });
+
+    it('returns 500 when the cost series RPC errors', async () => {
+        rpc.mockResolvedValue({ data: null, error: { message: 'series boom' } });
+        const url = new URL('https://x/api/cost/series');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(res.status).toBe(500);
+    });
+
+    it('treats a null (but error-free) cost series result as empty', async () => {
+        rpc.mockResolvedValue({ data: null, error: null });
+        const url = new URL('https://x/api/cost/series');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(await res.json()).toEqual({ series: [] });
+    });
+
+    it('returns 404 for an unknown cost subpath', async () => {
+        const url = new URL('https://x/api/cost/nope');
+        const req = new Request(url, { headers: authHeaders });
+        const res = await handleCostApi(req, testEnv, url);
+        expect(res.status).toBe(404);
+    });
+});
+
 describe('handleFaviconAsset', () => {
     it('returns null for a path with no matching asset', () => {
         expect(handleFaviconAsset('/nope.png')).toBeNull();
@@ -677,6 +756,31 @@ describe('default export fetch routing', () => {
         const res = await worker.fetch(req, testEnv);
         expect(res.status).toBe(200);
         expect(await res.json()).toEqual({ projects: ['a'] });
+    });
+
+    it('requires Basic Auth on /api/cost/*', async () => {
+        const req = new Request('https://x/api/cost/table');
+        const res = await worker.fetch(req, testEnv);
+        expect(res.status).toBe(401);
+    });
+
+    it('rejects non-GET on /api/cost/*', async () => {
+        const req = new Request('https://x/api/cost/table', {
+            method: 'POST',
+            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
+        });
+        const res = await worker.fetch(req, testEnv);
+        expect(res.status).toBe(405);
+    });
+
+    it('serves an authorized /api/cost/* request end-to-end', async () => {
+        rpc.mockResolvedValue({ data: [{ project_name: 'a', total_cost_usd: 1 }], error: null });
+        const req = new Request('https://x/api/cost/table', {
+            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
+        });
+        const res = await worker.fetch(req, testEnv);
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ rows: [{ project_name: 'a', total_cost_usd: 1 }] });
     });
 
     it('serves favicon assets without requiring auth', async () => {

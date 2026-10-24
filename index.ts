@@ -199,6 +199,39 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
     return jsonResponse({ error: 'Not Found' }, 404);
 }
 
+export async function handleCostApi(request: Request, env: Env, url: URL): Promise<Response> {
+    const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+        auth: { persistSession: false },
+    });
+
+    const projects = parseProjectsParam(url);
+    const start = url.searchParams.get('start') ?? undefined;
+    const end = url.searchParams.get('end') ?? undefined;
+
+    if (url.pathname === '/api/cost/table') {
+        const { data, error } = await supabase.rpc('get_cost_table', {
+            p_projects: projects,
+            p_start: start,
+            p_end: end,
+        });
+        if (error) return jsonResponse({ error: error.message }, 500);
+        return jsonResponse({ rows: data ?? [] });
+    }
+
+    if (url.pathname === '/api/cost/series') {
+        const { data, error } = await supabase.rpc('get_cost_series', {
+            p_projects: projects,
+            p_start: start,
+            p_end: end,
+            p_bucket: parseBucketParam(url),
+        });
+        if (error) return jsonResponse({ error: error.message }, 500);
+        return jsonResponse({ series: data ?? [] });
+    }
+
+    return jsonResponse({ error: 'Not Found' }, 404);
+}
+
 export default {
     async fetch(request: Request, env: Env): Promise<Response> {
         const url = new URL(request.url);
@@ -230,6 +263,16 @@ export default {
                 return unauthorizedResponse();
             }
             return handleTokenUsageApi(request, env, url);
+        }
+
+        if (url.pathname.startsWith('/api/cost/')) {
+            if (request.method !== 'GET') {
+                return jsonResponse({ error: 'Method Not Allowed' }, 405);
+            }
+            if (!isDashboardAuthorized(request, env)) {
+                return unauthorizedResponse();
+            }
+            return handleCostApi(request, env, url);
         }
 
         return jsonResponse({ error: 'Not Found' }, 404);
