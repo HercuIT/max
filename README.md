@@ -61,7 +61,13 @@ See `specs/token-usage-dashboard.md` for the full spec these implement.
 
 ## Pointing Claude Code at it
 
-In Claude Code's settings (e.g. `.claude/settings.json`), configure the OTLP exporter env vars to point at your deployed worker, using the same token as `INGEST_SECRET_TOKEN`:
+**A project's `.claude/settings.json` cannot be used for this.** Claude Code only lets project-level settings files *disable* telemetry (e.g. setting `OTEL_METRICS_EXPORTER` to `none`) — `CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER`, `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_EXPORTER_OTLP_ENDPOINT`, and `OTEL_EXPORTER_OTLP_HEADERS` are silently ignored if set there (run `/status` in Claude Code to see this confirmed under "System diagnostics"). These vars only take effect in one of:
+
+- your **shell environment** (exported before launching `claude`), or
+- your **user settings** (`~/.claude/settings.json`), or
+- **managed settings**.
+
+Since telemetry applies per-process, setting this in your user settings is normally what you want — it then covers every project you work in on that machine, not just one:
 ```json
 {
   "env": {
@@ -70,10 +76,13 @@ In Claude Code's settings (e.g. `.claude/settings.json`), configure the OTLP exp
     "OTEL_LOGS_EXPORTER": "otlp",
     "OTEL_EXPORTER_OTLP_PROTOCOL": "http/json",
     "OTEL_EXPORTER_OTLP_ENDPOINT": "https://<your-worker>.workers.dev",
-    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer <INGEST_SECRET_TOKEN>"
+    "OTEL_EXPORTER_OTLP_HEADERS": "Authorization=Bearer <INGEST_SECRET_TOKEN>",
+    "OTEL_METRICS_INCLUDE_REPOSITORY": "true"
   }
 }
 ```
+
+If you only want a specific other project to opt out of reporting here, set `OTEL_METRICS_EXPORTER`/`OTEL_LOGS_EXPORTER` to `"none"` in *that* project's own `.claude/settings.json` — that's the one thing project-level settings are allowed to do.
 
 **Never commit a real token in this file.** Keep secrets out of version control — use a local, gitignored settings file or a secrets manager instead.
 
