@@ -32,6 +32,55 @@ Guidance for Claude Code when working in this repository.
 - The `get_token_usage_*` and `get_cost_*` Postgres functions have `EXECUTE` revoked from `anon`/`authenticated` and granted only to `service_role` (see the migrations). This data isn't scoped by RLS/ownership, so if `anon`/`authenticated` could call them, anyone with the public anon key could read every project's usage. Keep that revoke/grant pattern for any new dashboard RPC.
 - `get_cost_table`/`get_cost_series` intentionally default `p_start`/`p_end` to `NULL` (meaning "no filter" / all-time), unlike `get_token_usage_series`/`get_token_usage_table`, which default to `now() - interval '7 days'`. This is deliberate — `specs/usd-per-project-dashboard.md` wants the Cost (USD) tab to default to all-time — not an inconsistency to "fix" by matching the other two.
 
+## Secrets and variables reference
+
+Everything below is the full inventory — if you add a new secret or env var anywhere in this repo (Worker, migrations CI, Worker deploy CI, or the client-side telemetry setup this Worker ingests from), add it here too.
+
+### Worker secrets (`wrangler secret put`, read via the `Env` interface in `index.ts`)
+
+Not in `wrangler.toml` — set per-environment with `wrangler secret put <NAME>`, or locally via `.dev.vars` (gitignored) for `wrangler dev`.
+
+| Name | Used for |
+|---|---|
+| `SUPABASE_URL` | Supabase project URL, passed to `createClient` in `handleIngest`/`handleTokenUsageApi`/`handleCostApi`. |
+| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key — bypasses RLS, required because `get_token_usage_*`/`get_cost_*` have `EXECUTE` revoked from `anon`/`authenticated`. Never print/log. |
+| `INGEST_SECRET_TOKEN` | Static bearer token checked (`===`) against the `Authorization` header on `/v1/metrics` and `/v1/logs`. Never print/log. |
+| `DASHBOARD_USERNAME` | HTTP Basic Auth username for `/dashboard/token-usage` and `/api/token-usage/*`/`/api/cost/*` (`isDashboardAuthorized`). |
+| `DASHBOARD_PASSWORD` | HTTP Basic Auth password, same check. Never print/log. |
+
+### `wrangler.toml` (non-secret, committed)
+
+Only `name`, `main`, `compatibility_date`, and the `[observability.*]` blocks — no secrets or environment-specific values belong here.
+
+### GitHub Actions repo secrets
+
+| Name | Used by | Purpose |
+|---|---|---|
+| `SUPABASE_ACCESS_TOKEN` | `deploy-migrations.yml` | Auth for `supabase link`/`supabase db push`. |
+| `SUPABASE_PROJECT_ID` | `deploy-migrations.yml` | Target project ref for `supabase link`. |
+| `SUPABASE_DB_PASSWORD` | `deploy-migrations.yml` | DB password `supabase db push` needs to connect. |
+| `CLOUDFLARE_API_TOKEN` | `deploy-worker.yml`, `set-dashboard-credentials.yml` | Auth for `wrangler deploy`/`wrangler secret put`. |
+| `CLOUDFLARE_ACCOUNT_ID` | `deploy-worker.yml`, `set-dashboard-credentials.yml` | Target Cloudflare account. |
+| `DASHBOARD_USERNAME` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
+| `DASHBOARD_PASSWORD` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
+
+### Claude Code telemetry client env vars (set outside this repo, on the machines sending telemetry — not Worker config)
+
+These configure the Claude Code CLI itself to export OTLP to this Worker. They only take effect in the user's shell environment, `~/.claude/settings.json`, or managed settings — **never** in a project's own `.claude/settings.json` (see below).
+
+| Name | Purpose | Default |
+|---|---|---|
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | Turns telemetry export on. | off |
+| `OTEL_METRICS_EXPORTER` | Set to `otlp` to export metrics (or `none` to opt a project out, which *is* allowed in that project's own `.claude/settings.json`). | unset |
+| `OTEL_LOGS_EXPORTER` | Set to `otlp` to export logs/events (currently a no-op on this Worker's `/v1/logs`). | unset |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | e.g. `http/json`. | unset |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | This Worker's base URL. | unset |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Carries `Authorization=Bearer <INGEST_SECRET_TOKEN>`. Never commit the real value into this repo. | unset |
+| `OTEL_METRICS_INCLUDE_REPOSITORY` | Sends `vcs.repository.name` (CLI ≥ v2.1.269) — needed for real project attribution instead of collapsing into `default-project`. | `false` |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Export flush interval in ms. | `60000` |
+| `OTEL_RESOURCE_ATTRIBUTES` | Custom `key=value` resource attributes (e.g. `host.name=<literal-value>`, no shell expansion) feeding `token_usage_logs.host_name`/`user_email` — see `specs/machine-and-user-attribution.md`. | unset |
+| `OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES` | Whether `OTEL_RESOURCE_ATTRIBUTES` keys are actually attached to metrics. | `true` |
+
 ## Secrets — handle with care
 
 - Project-level `.claude/settings.json` cannot configure telemetry (see "Working in this repo" above) and no longer carries the ingest token — the real `OTEL_EXPORTER_OTLP_HEADERS` bearer token now lives in the user's `~/.claude/settings.json` instead, outside this repo. **Never commit a real secret value into this repo's `.claude/settings.json`.** If you edit this file, flag to the user whether any value you add is a placeholder or a real credential before staging/committing it.
