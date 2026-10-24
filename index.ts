@@ -78,34 +78,58 @@ async function handleIngest(request: Request, env: Env, url: URL): Promise<Respo
             auth: { persistSession: false },
         });
 
+        const findAttr = (attrs: any[] | undefined, key: string): string | undefined =>
+            attrs?.find((a) => a.key === key)?.value?.stringValue;
+
         const recordsToInsert = [];
         const resourceMetrics = payload.resourceMetrics || [];
 
         for (const resMetric of resourceMetrics) {
             const resAttrs = resMetric.resource?.attributes || [];
-            const projAttr = resAttrs.find((a: any) => a.key === 'project.name' || a.key === 'service.name');
-            const projectName = projAttr?.value?.stringValue || 'default-project';
+            const projectName =
+                findAttr(resAttrs, 'vcs.repository.name') ??
+                findAttr(resAttrs, 'project.name') ??
+                findAttr(resAttrs, 'service.name') ??
+                'default-project';
 
             for (const scopeMetric of resMetric.scopeMetrics || []) {
                 for (const metric of scopeMetric.metrics || []) {
                     const dps = metric.sum?.dataPoints || metric.gauge?.dataPoints || [];
                     for (const dp of dps) {
-                        const val = dp.asDouble ?? dp.asInt ?? 0;
-                        recordsToInsert.push({
+                        const val = Number(dp.asDouble ?? dp.asInt ?? 0);
+                        const record = {
                             project_name: projectName,
-                            session_id: 'active_session',
+                            session_id: findAttr(dp.attributes, 'session.id') || 'active_session',
                             model: 'claude-3-5-sonnet',
-                            input_tokens: metric.name.includes('input') ? val : 0,
-                            output_tokens: metric.name.includes('output') ? val : 0,
-                            total_cost_usd: metric.name.includes('cost') ? val : 0,
-                        });
+                            input_tokens: 0,
+                            output_tokens: 0,
+                            cache_read_tokens: 0,
+                            cache_write_tokens: 0,
+                            total_cost_usd: 0,
+                        };
+
+                        if (metric.name === 'claude_code.token.usage') {
+                            const type = findAttr(dp.attributes, 'type');
+                            if (type === 'input') record.input_tokens = val;
+                            else if (type === 'output') record.output_tokens = val;
+                            else if (type === 'cacheRead') record.cache_read_tokens = val;
+                            else if (type === 'cacheCreation') record.cache_write_tokens = val;
+                            else continue;
+                        } else if (metric.name === 'claude_code.cost.usage') {
+                            record.total_cost_usd = val;
+                        } else {
+                            continue;
+                        }
+
+                        recordsToInsert.push(record);
                     }
                 }
             }
         }
 
         if (recordsToInsert.length > 0) {
-            await supabase.from('token_usage_logs').insert(recordsToInsert);
+            const { error: insertError } = await supabase.from('token_usage_logs').insert(recordsToInsert);
+            if (insertError) return jsonResponse({ error: insertError.message }, 500);
         }
 
         return jsonResponse({ success: true, count: recordsToInsert.length });
