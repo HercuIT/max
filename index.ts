@@ -111,6 +111,13 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
                 findAttr(resAttrs, 'project.name') ??
                 findAttr(resAttrs, 'service.name') ??
                 'default-project';
+            console.log('[ingest] resolved projectName', JSON.stringify({
+                projectName,
+                vcsRepositoryName: findAttr(resAttrs, 'vcs.repository.name'),
+                projectNameAttr: findAttr(resAttrs, 'project.name'),
+                serviceName: findAttr(resAttrs, 'service.name'),
+                allResourceAttrKeys: resAttrs.map((a: any) => a.key),
+            }));
 
             for (const scopeMetric of resMetric.scopeMetrics || []) {
                 for (const metric of scopeMetric.metrics || []) {
