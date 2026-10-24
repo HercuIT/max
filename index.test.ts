@@ -1,9 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-const insert = vi.fn();
-const from = vi.fn(() => ({ insert }));
-const rpc = vi.fn();
-const createClient = vi.fn(() => ({ from, rpc }));
+const { insert, from, rpc, createClient } = vi.hoisted(() => {
+    const insert = vi.fn();
+    const from = vi.fn(() => ({ insert }));
+    const rpc = vi.fn();
+    const createClient = vi.fn(() => ({ from, rpc }));
+    return { insert, from, rpc, createClient };
+});
 
 vi.mock('@supabase/supabase-js', () => ({ createClient }));
 
