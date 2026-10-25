@@ -98,6 +98,13 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   th:first-child, td:first-child { text-align: left; }
   th { cursor: pointer; user-select: none; color: var(--muted); font-weight: 600; }
   th.sorted { color: var(--fg); }
+  tr.filter-row td { padding: 4px 10px; border-bottom: 1px solid var(--border); }
+  .filter-input { width: 100%; box-sizing: border-box; font-size: 0.78rem; padding: 4px 6px; }
+  .range { display: flex; gap: 4px; }
+  .range input { width: 50%; }
+  .table-toolbar { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+  .table-toolbar button { background: transparent; color: var(--muted); border: 1px solid var(--border); font-weight: 600; padding: 4px 10px; font-size: 0.78rem; }
+  .table-toolbar button:hover { background: var(--border); color: var(--fg); }
   #status { color: var(--muted); font-size: 0.85rem; margin-bottom: 12px; min-height: 1.2em; }
   canvas { max-height: 360px; }
 </style>
@@ -164,6 +171,9 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     </div>
 
     <div class="card">
+      <div class="table-toolbar">
+        <button id="clearTableFilters" type="button">Clear filters</button>
+      </div>
       <table id="table">
         <thead>
           <tr>
@@ -175,6 +185,16 @@ export const tokenUsageDashboardHtml = `<!doctype html>
             <th data-key="total_tokens" class="sorted">Total tokens</th>
             <th data-key="sessions">Sessions</th>
             <th data-key="last_active">Last active</th>
+          </tr>
+          <tr class="filter-row">
+            <td><input class="filter-input" type="text" data-key="project_name" data-filter="text" placeholder="Filter..." /></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="input_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="input_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="output_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="output_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="cache_read_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="cache_read_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="cache_write_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="cache_write_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="total_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="total_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="sessions" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="sessions" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="date" data-key="last_active" data-filter="from" /><input class="filter-input" type="date" data-key="last_active" data-filter="to" /></div></td>
           </tr>
         </thead>
         <tbody></tbody>
@@ -193,6 +213,9 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     </div>
 
     <div class="card">
+      <div class="table-toolbar">
+        <button id="clearCostFilters" type="button">Clear filters</button>
+      </div>
       <table id="costTable">
         <thead>
           <tr>
@@ -202,6 +225,14 @@ export const tokenUsageDashboardHtml = `<!doctype html>
             <th data-key="cost_per_1k_tokens">Cost per 1K tokens</th>
             <th data-key="sessions">Sessions</th>
             <th data-key="last_active">Last active</th>
+          </tr>
+          <tr class="filter-row">
+            <td><input class="filter-input" type="text" data-key="project_name" data-filter="text" placeholder="Filter..." /></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="total_cost_usd" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="total_cost_usd" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="total_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="total_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="cost_per_1k_tokens" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="cost_per_1k_tokens" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="number" data-key="sessions" data-filter="min" placeholder="Min" /><input class="filter-input" type="number" data-key="sessions" data-filter="max" placeholder="Max" /></div></td>
+            <td><div class="range"><input class="filter-input" type="date" data-key="last_active" data-filter="from" /><input class="filter-input" type="date" data-key="last_active" data-filter="to" /></div></td>
           </tr>
         </thead>
         <tbody></tbody>
@@ -224,8 +255,18 @@ export const tokenUsageDashboardHtml = `<!doctype html>
 
   let chart = null;
   let tableRows = [];
-  let sortKey = 'total_tokens';
-  let sortDir = -1;
+  const tokenSort = { key: 'total_tokens', dir: -1 };
+  const tokenFilters = {};
+  const TOKEN_COLUMNS = [
+    { key: 'project_name', type: 'text' },
+    { key: 'input_tokens', type: 'number' },
+    { key: 'output_tokens', type: 'number' },
+    { key: 'cache_read_tokens', type: 'number' },
+    { key: 'cache_write_tokens', type: 'number' },
+    { key: 'total_tokens', type: 'number' },
+    { key: 'sessions', type: 'number' },
+    { key: 'last_active', type: 'date' },
+  ];
 
   let activeTab = 'tokens';
   const rangeByTab = { tokens: null, cost: null };
@@ -233,8 +274,16 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   let costChartMode = 'bar';
   let costRows = [];
   let costSeries = [];
-  let costSortKey = 'total_cost_usd';
-  let costSortDir = -1;
+  const costSort = { key: 'total_cost_usd', dir: -1 };
+  const costFilters = {};
+  const COST_COLUMNS = [
+    { key: 'project_name', type: 'text' },
+    { key: 'total_cost_usd', type: 'number' },
+    { key: 'total_tokens', type: 'number' },
+    { key: 'cost_per_1k_tokens', type: 'number' },
+    { key: 'sessions', type: 'number' },
+    { key: 'last_active', type: 'date' },
+  ];
 
   const PROJECT_COLORS = ['#FF6A1F', '#5b5bd6', '#d65b9d', '#5bd6c0', '#d6c05b', '#E5341B', '#FFB627', '#9bb1ad'];
   function colorFor(index) {
@@ -321,13 +370,89 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     });
   }
 
-  function renderTable() {
-    const sorted = [...tableRows].sort((a, b) => {
-      const av = a[sortKey];
-      const bv = b[sortKey];
+  function rowMatchesFilters(row, filters, columns) {
+    for (const col of columns) {
+      const f = filters[col.key];
+      if (!f) continue;
+      if (col.type === 'text') {
+        if (f.text && !String(row[col.key]).toLowerCase().includes(f.text.toLowerCase())) return false;
+      } else if (col.type === 'number') {
+        const v = Number(row[col.key]);
+        if (f.min !== undefined && f.min !== '' && v < Number(f.min)) return false;
+        if (f.max !== undefined && f.max !== '' && v > Number(f.max)) return false;
+      } else if (col.type === 'date') {
+        const v = row[col.key] ? new Date(row[col.key]) : null;
+        if (f.from) {
+          if (!v || v < new Date(f.from)) return false;
+        }
+        if (f.to) {
+          const to = new Date(f.to);
+          to.setHours(23, 59, 59, 999);
+          if (!v || v > to) return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  function applyFilters(rows, filters, columns) {
+    return rows.filter((row) => rowMatchesFilters(row, filters, columns));
+  }
+
+  function sortRows(rows, sort) {
+    return [...rows].sort((a, b) => {
+      const av = a[sort.key];
+      const bv = b[sort.key];
       if (av === bv) return 0;
-      return av > bv ? sortDir : -sortDir;
+      return av > bv ? sort.dir : -sort.dir;
     });
+  }
+
+  function updateSortHeader(head, sort) {
+    head.querySelectorAll('tr:first-child th').forEach((th) => {
+      const isSorted = th.dataset.key === sort.key;
+      th.classList.toggle('sorted', isSorted);
+      const arrow = isSorted ? (sort.dir === 1 ? ' ▲' : ' ▼') : '';
+      th.textContent = th.dataset.label + arrow;
+    });
+  }
+
+  function attachSort(head, sort, render) {
+    head.querySelectorAll('tr:first-child th').forEach((th) => {
+      th.dataset.label = th.textContent;
+    });
+    head.addEventListener('click', (e) => {
+      const th = e.target.closest('th');
+      if (!th) return;
+      sort.dir = th.dataset.key === sort.key ? -sort.dir : -1;
+      sort.key = th.dataset.key;
+      render();
+    });
+  }
+
+  function attachFilterRow(head, filters, render) {
+    const filterRow = head.querySelector('tr.filter-row');
+    let debounceTimer = null;
+    filterRow.addEventListener('input', (e) => {
+      const input = e.target.closest('input');
+      if (!input) return;
+      filters[input.dataset.key] = filters[input.dataset.key] || {};
+      filters[input.dataset.key][input.dataset.filter] = input.value;
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(render, 150);
+    });
+    return filterRow;
+  }
+
+  function clearFilters(filterRow, filters, render) {
+    filterRow.querySelectorAll('input').forEach((input) => { input.value = ''; });
+    Object.keys(filters).forEach((key) => delete filters[key]);
+    render();
+  }
+
+  function renderTable() {
+    const filtered = applyFilters(tableRows, tokenFilters, TOKEN_COLUMNS);
+    const sorted = sortRows(filtered, tokenSort);
     tableBody.innerHTML = '';
     for (const row of sorted) {
       const tr = document.createElement('tr');
@@ -343,19 +468,12 @@ export const tokenUsageDashboardHtml = `<!doctype html>
         '<td>' + lastActive + '</td>';
       tableBody.appendChild(tr);
     }
-    tableHead.querySelectorAll('th').forEach((th) => {
-      th.classList.toggle('sorted', th.dataset.key === sortKey);
-    });
+    updateSortHeader(tableHead, tokenSort);
   }
 
-  tableHead.addEventListener('click', (e) => {
-    const th = e.target.closest('th');
-    if (!th) return;
-    const key = th.dataset.key;
-    sortDir = key === sortKey ? -sortDir : -1;
-    sortKey = key;
-    renderTable();
-  });
+  attachSort(tableHead, tokenSort, renderTable);
+  const tableFilterRow = attachFilterRow(tableHead, tokenFilters, renderTable);
+  document.getElementById('clearTableFilters').addEventListener('click', () => clearFilters(tableFilterRow, tokenFilters, renderTable));
 
   function renderCostBarChart() {
     if (costChart) costChart.destroy();
@@ -399,12 +517,8 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   }
 
   function renderCostTable() {
-    const sorted = [...costRows].sort((a, b) => {
-      const av = a[costSortKey];
-      const bv = b[costSortKey];
-      if (av === bv) return 0;
-      return av > bv ? costSortDir : -costSortDir;
-    });
+    const filtered = applyFilters(costRows, costFilters, COST_COLUMNS);
+    const sorted = sortRows(filtered, costSort);
     costTableBody.innerHTML = '';
     for (const row of sorted) {
       const tr = document.createElement('tr');
@@ -418,19 +532,12 @@ export const tokenUsageDashboardHtml = `<!doctype html>
         '<td>' + lastActive + '</td>';
       costTableBody.appendChild(tr);
     }
-    costTableHead.querySelectorAll('th').forEach((th) => {
-      th.classList.toggle('sorted', th.dataset.key === costSortKey);
-    });
+    updateSortHeader(costTableHead, costSort);
   }
 
-  costTableHead.addEventListener('click', (e) => {
-    const th = e.target.closest('th');
-    if (!th) return;
-    const key = th.dataset.key;
-    costSortDir = key === costSortKey ? -costSortDir : -1;
-    costSortKey = key;
-    renderCostTable();
-  });
+  attachSort(costTableHead, costSort, renderCostTable);
+  const costFilterRow = attachFilterRow(costTableHead, costFilters, renderCostTable);
+  document.getElementById('clearCostFilters').addEventListener('click', () => clearFilters(costFilterRow, costFilters, renderCostTable));
 
   document.querySelectorAll('.chart-toggle button').forEach((b) => {
     b.addEventListener('click', () => {
