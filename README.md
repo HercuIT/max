@@ -6,7 +6,7 @@ A Cloudflare Worker (`claude-code-telemetry-ingest`) that receives Claude Code's
 
 Claude Code can export usage telemetry (tokens, cost, sessions) via OTLP. This worker exposes two endpoints for that exporter and persists metric data points into a Supabase Postgres table for later querying/reporting.
 
-## Endpoints
+## Endpoint
 
 - `POST /v1/metrics` — accepts an OTLP metrics payload and inserts rows into `token_usage_logs`. Matches on the exact metric name (`claude_code.token.usage`, `claude_code.cost.usage`); for token usage, reads the `type` attribute (`input`/`output`/`cacheRead`/`cacheCreation`) off each data point rather than off the metric name, since Claude Code doesn't send a separate metric name per token type. Every inserted row currently hardcodes `model` to `'claude-3-5-sonnet'` regardless of the model actually used — a known simplification, not yet wired up to real model data.
 - `POST /v1/logs` — accepts an OTLP logs payload and acknowledges it (not persisted).
