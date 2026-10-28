@@ -1,6 +1,6 @@
 # Multi-tenant support
 
-Status: proposed specification; no application or database changes implemented.
+Status: implementation contract. Local implementation and tests are included; production cutover and operational release gates remain separate. See [operations](../docs/tenancy-operations.md).
 
 Companion documents: [Supabase architecture](supabase-tenancy.md) and [rollout and acceptance tests](multi-tenant-rollout.md).
 
@@ -65,7 +65,7 @@ Keep `POST /v1/metrics` and `POST /v1/logs` compatible with OTLP/HTTP JSON and t
 - Both sources are permitted by a tenant key in the initial release. Preserve source tagging, Codex token-category mapping, and reported-cost semantics.
 - The existing Codex `?project=` override may select a project name only within the key's tenant. Claude repository attributes have the same boundary. Identical project names in separate tenants remain separate projects.
 - Resolve or create projects within the same authorized database transaction as usage insertion. Do not accept a caller-provided project UUID without verifying its tenant.
-- Invalid, expired, revoked, or disabled-tenant keys return the same `401` response. Database unavailability returns retryable `503`, not a misleading authentication error. No partial insertion within one OTLP batch.
+- Invalid, expired, revoked, or disabled-tenant keys return the same `401` response. Database unavailability returns retryable `503`, not a misleading authentication error. The accepted normalized rows in one OTLP batch are inserted atomically; malformed Codex records remain explicitly rejected through OTLP partial success.
 - Apply bounded request sizes and batch counts before costly parsing/insertion; proposed initial limits are 1 MiB JSON bodies and 5,000 normalized usage rows per request. Return `413` for these limits. Make deployment limits explicit and compatible with the Worker platform limits.
 - Never log tokens, raw OTLP bodies, prompts, or Supabase credentials. Log request ID, operation, safe failure category, and resolved tenant/key IDs when authorization succeeded.
 

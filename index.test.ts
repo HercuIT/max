@@ -1,889 +1,38 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-
-const { insert, from, rpc, createClient } = vi.hoisted(() => {
-    const insert = vi.fn();
-    const from = vi.fn(() => ({ insert }));
-    const rpc = vi.fn();
-    const createClient = vi.fn(() => ({ from, rpc }));
-    return { insert, from, rpc, createClient };
+const { insert, rpc, getUser, refreshSession, signInWithOtp, verifyOtp, signOut, createClient } = vi.hoisted(() => {
+ const insert=vi.fn(); const rpc=vi.fn(); const getUser=vi.fn(); const refreshSession=vi.fn();
+ const signInWithOtp=vi.fn(); const verifyOtp=vi.fn(); const signOut=vi.fn();
+ const createClient=vi.fn(()=>({rpc,auth:{getUser,refreshSession,signInWithOtp,verifyOtp,admin:{signOut}}}));
+ return {insert,rpc,getUser,refreshSession,signInWithOtp,verifyOtp,signOut,createClient};
 });
-
-vi.mock('@supabase/supabase-js', () => ({ createClient }));
-
-import worker, {
-    findAttr,
-    handleCostApi,
-    handleFaviconAsset,
-    handleIngest,
-    handleTokenUsageApi,
-    isDashboardAuthorized,
-    jsonResponse,
-    parseBucketParam,
-    parseCodexLogs,
-    parseProjectsParam,
-    unauthorizedResponse,
-    type Env,
-} from './index';
-
-const testEnv: Env = {
-    SUPABASE_URL: 'https://example.supabase.test',
-    SUPABASE_SERVICE_ROLE_KEY: 'test-service-role-key',
-    INGEST_SECRET_TOKEN: 'test-ingest-token',
-    DASHBOARD_USERNAME: 'test-user',
-    DASHBOARD_PASSWORD: 'test-pass',
-};
-
-function basicAuthHeader(user: string, pass: string): string {
-    return 'Basic ' + btoa(`${user}:${pass}`);
+vi.mock('@supabase/supabase-js',()=>({createClient}));
+import worker, {parseCodexLogs, type Env} from './index';
+import {digest, randomToken, readJson, databaseError, uuid, ApiError} from './http';
+import {dashboardArguments} from './tenancy';
+import {sessionFor} from './auth';
+const tenant='10000000-0000-4000-8000-000000000001';
+const other='10000000-0000-4000-8000-000000000002';
+const testEnv:Env={SUPABASE_URL:'https://example.supabase.test',SUPABASE_PUBLISHABLE_KEY:'test-publishable',SUPABASE_SERVICE_ROLE_KEY:'test-service',APP_ORIGIN:'https://x'};
+const authCookie='__Host-burnrate-access=valid; __Host-burnrate-csrf=csrf';
+beforeEach(()=>{
+ vi.clearAllMocks(); vi.unstubAllGlobals();
+ insert.mockResolvedValue({error:null});
+ getUser.mockResolvedValue({data:{user:null},error:null});
+ refreshSession.mockResolvedValue({data:{session:null},error:null});
+ signInWithOtp.mockResolvedValue({error:null}); verifyOtp.mockResolvedValue({data:{session:{access_token:'access',refresh_token:'refresh',expires_in:3600}},error:null}); signOut.mockResolvedValue({error:null});
+ rpc.mockImplementation(async(name:string,args:any)=>{
+  if(name==='check_rate_limit')return {data:true,error:null};
+  if(name==='ingest_telemetry'){if(args.p_rows.length)await insert(args.p_rows);return {data:{count:args.p_rows.length,tenant_id:tenant,key_id:other},error:null};}
+  if(name==='list_tenants')return {data:[{id:tenant,name:'A',role:'owner'}],error:null};
+  if(name==='manage_tenant')return {data:{id:other,email:'invite@example.test'},error:null};
+  if(name==='accept_tenant_invitation')return {data:tenant,error:null};
+  return {data:[],error:null};
+ });
+});
+function signedIn(){getUser.mockResolvedValue({data:{user:{id:other}},error:null});}
+function call(path:string,method='GET',body?:unknown,headers:Record<string,string>={}){
+ return worker.fetch(new Request('https://x'+path,{method,headers:{'Content-Type':'application/json',Cookie:authCookie,Origin:'https://x','X-CSRF-Token':'csrf',...headers},...(body===undefined?{}:{body:JSON.stringify(body)})}),testEnv);
 }
-
-beforeEach(() => {
-    insert.mockReset().mockResolvedValue({ error: null });
-    from.mockReset().mockReturnValue({ insert });
-    rpc.mockReset().mockResolvedValue({ data: [], error: null });
-    createClient.mockClear();
-});
-
-describe('parseProjectsParam', () => {
-    it('returns null when the param is missing', () => {
-        expect(parseProjectsParam(new URL('https://x/?'))).toBeNull();
-    });
-
-    it('returns null when the param is empty', () => {
-        expect(parseProjectsParam(new URL('https://x/?projects='))).toBeNull();
-    });
-
-    it('splits, trims, and drops empty entries', () => {
-        expect(parseProjectsParam(new URL('https://x/?projects=a,%20b%20,,c'))).toEqual(['a', 'b', 'c']);
-    });
-
-    it('returns a single-element array for one project', () => {
-        expect(parseProjectsParam(new URL('https://x/?projects=a'))).toEqual(['a']);
-    });
-
-    it('returns null when every entry is empty after trimming', () => {
-        expect(parseProjectsParam(new URL('https://x/?projects=,%20,'))).toBeNull();
-    });
-});
-
-describe('parseBucketParam', () => {
-    it('defaults to day when missing', () => {
-        expect(parseBucketParam(new URL('https://x/?'))).toBe('day');
-    });
-
-    it('accepts hour', () => {
-        expect(parseBucketParam(new URL('https://x/?bucket=hour'))).toBe('hour');
-    });
-
-    it('accepts week', () => {
-        expect(parseBucketParam(new URL('https://x/?bucket=week'))).toBe('week');
-    });
-
-    it('falls back to day for an invalid value', () => {
-        expect(parseBucketParam(new URL('https://x/?bucket=month'))).toBe('day');
-    });
-});
-
-describe('jsonResponse', () => {
-    it('defaults to status 200 and application/json', async () => {
-        const res = jsonResponse({ ok: true });
-        expect(res.status).toBe(200);
-        expect(res.headers.get('content-type')).toBe('application/json');
-        expect(await res.json()).toEqual({ ok: true });
-    });
-
-    it('honors a custom status', async () => {
-        const res = jsonResponse({ error: 'nope' }, 404);
-        expect(res.status).toBe(404);
-        expect(await res.json()).toEqual({ error: 'nope' });
-    });
-});
-
-describe('findAttr', () => {
-    it('returns undefined when attrs is undefined', () => {
-        expect(findAttr(undefined, 'type')).toBeUndefined();
-    });
-
-    it('returns undefined when the key is not present', () => {
-        expect(findAttr([{ key: 'other', value: { stringValue: 'x' } }], 'type')).toBeUndefined();
-    });
-
-    it('returns the stringValue when the key matches', () => {
-        expect(findAttr([{ key: 'type', value: { stringValue: 'input' } }], 'type')).toBe('input');
-    });
-
-    it('returns undefined when the matching attr has no stringValue', () => {
-        expect(findAttr([{ key: 'type', value: {} }], 'type')).toBeUndefined();
-    });
-});
-
-describe('isDashboardAuthorized', () => {
-    function req(headers: Record<string, string> = {}) {
-        return new Request('https://x/dashboard/token-usage', { headers });
-    }
-
-    it('accepts correct credentials', () => {
-        const r = req({ Authorization: basicAuthHeader('test-user', 'test-pass') });
-        expect(isDashboardAuthorized(r, testEnv)).toBe(true);
-    });
-
-    it('rejects a missing Authorization header', () => {
-        expect(isDashboardAuthorized(req(), testEnv)).toBe(false);
-    });
-
-    it('rejects a non-Basic scheme', () => {
-        const r = req({ Authorization: 'Bearer sometoken' });
-        expect(isDashboardAuthorized(r, testEnv)).toBe(false);
-    });
-
-    it('rejects malformed base64', () => {
-        const r = req({ Authorization: 'Basic %%%not-base64%%%' });
-        expect(isDashboardAuthorized(r, testEnv)).toBe(false);
-    });
-
-    it('rejects a decoded value with no colon separator', () => {
-        const r = req({ Authorization: 'Basic ' + btoa('no-colon-here') });
-        expect(isDashboardAuthorized(r, testEnv)).toBe(false);
-    });
-
-    it('rejects wrong credentials', () => {
-        const r = req({ Authorization: basicAuthHeader('test-user', 'wrong-pass') });
-        expect(isDashboardAuthorized(r, testEnv)).toBe(false);
-    });
-});
-
-describe('unauthorizedResponse', () => {
-    it('returns 401 with a WWW-Authenticate header', () => {
-        const res = unauthorizedResponse();
-        expect(res.status).toBe(401);
-        expect(res.headers.get('WWW-Authenticate')).toContain('Basic');
-    });
-});
-
-describe('handleIngest', () => {
-    const url = new URL('https://x/v1/metrics');
-    const authHeaders = { Authorization: `Bearer ${testEnv.INGEST_SECRET_TOKEN}` };
-
-    it('rejects non-POST methods', async () => {
-        const req = new Request('https://x/v1/metrics', { method: 'GET' });
-        const res = await handleIngest(req, testEnv, url);
-        expect(res.status).toBe(405);
-    });
-
-    it('rejects a missing Authorization header', async () => {
-        const req = new Request('https://x/v1/metrics', { method: 'POST', body: '{}' });
-        const res = await handleIngest(req, testEnv, url);
-        expect(res.status).toBe(401);
-    });
-
-    it('rejects an incorrect bearer token', async () => {
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: { Authorization: 'Bearer wrong-token' },
-            body: '{}',
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(res.status).toBe(401);
-    });
-
-    it('returns 500 for a malformed JSON body', async () => {
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: 'not json',
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(res.status).toBe(500);
-        const body = (await res.json()) as { error: string };
-        expect(body.error).toBeTruthy();
-    });
-
-    it('acknowledges /v1/logs without touching the database', async () => {
-        const logsUrl = new URL('https://x/v1/logs');
-        const req = new Request('https://x/v1/logs', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify({ resourceLogs: [] }),
-        });
-        const res = await handleIngest(req, testEnv, logsUrl);
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ message: 'Logs acknowledged' });
-        expect(insert).not.toHaveBeenCalled();
-    });
-
-    it('returns count 0 and skips insert for an empty payload', async () => {
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify({}),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(await res.json()).toEqual({ success: true, count: 0 });
-        expect(insert).not.toHaveBeenCalled();
-    });
-
-    it('skips data points for metric names it does not recognize', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        {
-                            metrics: [
-                                {
-                                    name: 'some.other.metric',
-                                    sum: { dataPoints: [{ asInt: '5' }] },
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(await res.json()).toEqual({ success: true, count: 0 });
-        expect(insert).not.toHaveBeenCalled();
-    });
-
-    it('skips token.usage data points with an unrecognized type attribute', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        {
-                            metrics: [
-                                {
-                                    name: 'claude_code.token.usage',
-                                    sum: {
-                                        dataPoints: [
-                                            { asInt: '5', attributes: [{ key: 'type', value: { stringValue: 'unknown' } }] },
-                                        ],
-                                    },
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(await res.json()).toEqual({ success: true, count: 0 });
-    });
-
-    it('parses all four token types plus cost, resolving project name via the data-point-level vcs.repository.name attribute', async () => {
-        const vcsAttr = { key: 'vcs.repository.name', value: { stringValue: 'repo-a' } };
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: {
-                        attributes: [{ key: 'project.name', value: { stringValue: 'should-be-ignored' } }],
-                    },
-                    scopeMetrics: [
-                        {
-                            metrics: [
-                                {
-                                    name: 'claude_code.token.usage',
-                                    sum: {
-                                        dataPoints: [
-                                            {
-                                                asInt: '10',
-                                                attributes: [
-                                                    vcsAttr,
-                                                    { key: 'type', value: { stringValue: 'input' } },
-                                                    { key: 'session.id', value: { stringValue: 'sess-1' } },
-                                                ],
-                                            },
-                                            { asInt: '20', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'output' } }] },
-                                            { asInt: '30', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'cacheRead' } }] },
-                                            { asInt: '40', attributes: [vcsAttr, { key: 'type', value: { stringValue: 'cacheCreation' } }] },
-                                        ],
-                                    },
-                                },
-                                {
-                                    name: 'claude_code.cost.usage',
-                                    sum: { dataPoints: [{ asDouble: 1.23, attributes: [vcsAttr] }] },
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(await res.json()).toEqual({ success: true, count: 5 });
-        expect(insert).toHaveBeenCalledTimes(1);
-        const records = insert.mock.calls[0][0];
-        expect(records).toHaveLength(5);
-        expect(records[0]).toEqual({
-            source: 'claude',
-            project_name: 'repo-a',
-            session_id: 'sess-1',
-            model: 'claude-3-5-sonnet',
-            input_tokens: 10,
-            output_tokens: 0,
-            cache_read_tokens: 0,
-            cache_write_tokens: 0,
-            total_cost_usd: 0,
-            host_name: null,
-            user_email: null,
-        });
-        expect(records[1]).toMatchObject({ output_tokens: 20, session_id: 'active_session' });
-        expect(records[2]).toMatchObject({ cache_read_tokens: 30 });
-        expect(records[3]).toMatchObject({ cache_write_tokens: 40 });
-        expect(records[4]).toMatchObject({ total_cost_usd: 1.23 });
-    });
-
-    it('falls back to project.name when vcs.repository.name is absent', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [{ key: 'project.name', value: { stringValue: 'proj-b' } }] },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0].project_name).toBe('proj-b');
-    });
-
-    it('falls back to service.name when neither vcs.repository.name nor project.name are present', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [{ key: 'service.name', value: { stringValue: 'svc-c' } }] },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0].project_name).toBe('svc-c');
-    });
-
-    it('falls back to default-project when no identifying attribute is present', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0].project_name).toBe('default-project');
-    });
-
-    it('records host_name and user_email from resource attributes when present', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: {
-                        attributes: [
-                            { key: 'host.name', value: { stringValue: 'build-7' } },
-                            { key: 'user.email', value: { stringValue: 'dev@example.com' } },
-                        ],
-                    },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: 'build-7', user_email: 'dev@example.com' });
-    });
-
-    it('records host_name and user_email from data-point attributes when present there instead', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        {
-                            metrics: [
-                                {
-                                    name: 'claude_code.cost.usage',
-                                    sum: {
-                                        dataPoints: [
-                                            {
-                                                asDouble: 1,
-                                                attributes: [
-                                                    { key: 'host.name', value: { stringValue: 'laptop-2' } },
-                                                    { key: 'user.email', value: { stringValue: 'other@example.com' } },
-                                                ],
-                                            },
-                                        ],
-                                    },
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: 'laptop-2', user_email: 'other@example.com' });
-    });
-
-    it('sets host_name and user_email to null when neither attribute is present anywhere', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0]).toMatchObject({ host_name: null, user_email: null });
-    });
-
-    it('reads gauge data points when sum is absent', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        {
-                            metrics: [
-                                {
-                                    name: 'claude_code.cost.usage',
-                                    gauge: { dataPoints: [{ asDouble: 9.99 }] },
-                                },
-                            ],
-                        },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0].total_cost_usd).toBe(9.99);
-    });
-
-    it('tolerates missing resource/scopeMetrics/metrics/sum|gauge keys at every level without throwing', async () => {
-        const payload = {
-            resourceMetrics: [
-                {}, // no `resource` at all -> falls back to default-project, no scopeMetrics -> no-op
-                { resource: { attributes: [] } }, // no `scopeMetrics` key
-                { resource: { attributes: [] }, scopeMetrics: [{}] }, // scopeMetric with no `metrics` key
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [{ metrics: [{ name: 'claude_code.cost.usage' }] }], // metric with neither sum nor gauge
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(await res.json()).toEqual({ success: true, count: 0 });
-        expect(insert).not.toHaveBeenCalled();
-    });
-
-    it('defaults the value to 0 when a data point has neither asDouble nor asInt', async () => {
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [{ metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{}] } }] }],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        await handleIngest(req, testEnv, url);
-        expect(insert.mock.calls[0][0][0].total_cost_usd).toBe(0);
-    });
-
-    it('returns 500 when the insert fails', async () => {
-        insert.mockResolvedValue({ error: { message: 'db down' } });
-        const payload = {
-            resourceMetrics: [
-                {
-                    resource: { attributes: [] },
-                    scopeMetrics: [
-                        { metrics: [{ name: 'claude_code.cost.usage', sum: { dataPoints: [{ asDouble: 1 }] } }] },
-                    ],
-                },
-            ],
-        };
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: authHeaders,
-            body: JSON.stringify(payload),
-        });
-        const res = await handleIngest(req, testEnv, url);
-        expect(res.status).toBe(500);
-        expect(await res.json()).toEqual({ error: 'db down' });
-    });
-});
-
-describe('handleTokenUsageApi', () => {
-    const authHeaders = { Authorization: basicAuthHeader(testEnv.DASHBOARD_USERNAME, testEnv.DASHBOARD_PASSWORD) };
-
-    it('returns the project list from the RPC', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a' }, { project_name: 'b' }], error: null });
-        const url = new URL('https://x/api/token-usage/projects');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ projects: ['a', 'b'] });
-    });
-
-    it('returns 500 when the projects RPC errors', async () => {
-        rpc.mockResolvedValue({ data: null, error: { message: 'boom' } });
-        const url = new URL('https://x/api/token-usage/projects');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(res.status).toBe(500);
-        expect(await res.json()).toEqual({ error: 'boom' });
-    });
-
-    it('passes parsed filters through to the series RPC', async () => {
-        rpc.mockResolvedValue({ data: [{ bucket: '2026-01-01' }], error: null });
-        const url = new URL('https://x/api/token-usage/series?projects=a,b&start=2026-01-01&end=2026-01-02&bucket=hour');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(rpc).toHaveBeenCalledWith('get_token_usage_series', {
-            p_projects: ['a', 'b'],
-            p_start: '2026-01-01',
-            p_end: '2026-01-02',
-            p_bucket: 'hour',
-        });
-        expect(await res.json()).toEqual({ series: [{ bucket: '2026-01-01' }] });
-    });
-
-    it('defaults the series bucket to day and projects to null when omitted', async () => {
-        const url = new URL('https://x/api/token-usage/series');
-        const req = new Request(url, { headers: authHeaders });
-        await handleTokenUsageApi(req, testEnv, url);
-        expect(rpc).toHaveBeenCalledWith('get_token_usage_series', {
-            p_projects: null,
-            p_start: undefined,
-            p_end: undefined,
-            p_bucket: 'day',
-        });
-    });
-
-    it('returns 500 when the series RPC errors', async () => {
-        rpc.mockResolvedValue({ data: null, error: { message: 'series boom' } });
-        const url = new URL('https://x/api/token-usage/series');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(res.status).toBe(500);
-    });
-
-    it('returns table rows from the RPC', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a', total_tokens: 100 }], error: null });
-        const url = new URL('https://x/api/token-usage/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ rows: [{ project_name: 'a', total_tokens: 100 }] });
-    });
-
-    it('returns 500 when the table RPC errors', async () => {
-        rpc.mockResolvedValue({ data: null, error: { message: 'table boom' } });
-        const url = new URL('https://x/api/token-usage/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(res.status).toBe(500);
-    });
-
-    it('treats a null (but error-free) projects result as empty', async () => {
-        rpc.mockResolvedValue({ data: null, error: null });
-        const url = new URL('https://x/api/token-usage/projects');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ projects: [] });
-    });
-
-    it('treats a null (but error-free) series result as empty', async () => {
-        rpc.mockResolvedValue({ data: null, error: null });
-        const url = new URL('https://x/api/token-usage/series');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ series: [] });
-    });
-
-    it('treats a null (but error-free) table result as empty', async () => {
-        rpc.mockResolvedValue({ data: null, error: null });
-        const url = new URL('https://x/api/token-usage/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ rows: [] });
-    });
-
-    it('returns 404 for an unknown token-usage subpath', async () => {
-        const url = new URL('https://x/api/token-usage/nope');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleTokenUsageApi(req, testEnv, url);
-        expect(res.status).toBe(404);
-    });
-});
-
-describe('handleCostApi', () => {
-    const authHeaders = { Authorization: basicAuthHeader(testEnv.DASHBOARD_USERNAME, testEnv.DASHBOARD_PASSWORD) };
-
-    it('returns table rows from the cost RPC', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a', total_cost_usd: 1.5 }], error: null });
-        const url = new URL('https://x/api/cost/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ rows: [{ project_name: 'a', total_cost_usd: 1.5 }] });
-    });
-
-    it('returns 500 when the cost table RPC errors', async () => {
-        rpc.mockResolvedValue({ data: null, error: { message: 'boom' } });
-        const url = new URL('https://x/api/cost/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(res.status).toBe(500);
-        expect(await res.json()).toEqual({ error: 'boom' });
-    });
-
-    it('treats a null (but error-free) cost table result as empty', async () => {
-        rpc.mockResolvedValue({ data: null, error: null });
-        const url = new URL('https://x/api/cost/table');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ rows: [] });
-    });
-
-    it('passes parsed filters through to the cost series RPC', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a', bucket: '2026-01-01', cost_usd: 1 }], error: null });
-        const url = new URL('https://x/api/cost/series?projects=a,b&start=2026-01-01&end=2026-01-02&bucket=hour');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(rpc).toHaveBeenCalledWith('get_cost_series', {
-            p_projects: ['a', 'b'],
-            p_start: '2026-01-01',
-            p_end: '2026-01-02',
-            p_bucket: 'hour',
-        });
-        expect(await res.json()).toEqual({ series: [{ project_name: 'a', bucket: '2026-01-01', cost_usd: 1 }] });
-    });
-
-    it('defaults the cost series bucket to day and projects/start/end to null/undefined when omitted', async () => {
-        const url = new URL('https://x/api/cost/series');
-        const req = new Request(url, { headers: authHeaders });
-        await handleCostApi(req, testEnv, url);
-        expect(rpc).toHaveBeenCalledWith('get_cost_series', {
-            p_projects: null,
-            p_start: undefined,
-            p_end: undefined,
-            p_bucket: 'day',
-        });
-    });
-
-    it('returns 500 when the cost series RPC errors', async () => {
-        rpc.mockResolvedValue({ data: null, error: { message: 'series boom' } });
-        const url = new URL('https://x/api/cost/series');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(res.status).toBe(500);
-    });
-
-    it('treats a null (but error-free) cost series result as empty', async () => {
-        rpc.mockResolvedValue({ data: null, error: null });
-        const url = new URL('https://x/api/cost/series');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(await res.json()).toEqual({ series: [] });
-    });
-
-    it('returns 404 for an unknown cost subpath', async () => {
-        const url = new URL('https://x/api/cost/nope');
-        const req = new Request(url, { headers: authHeaders });
-        const res = await handleCostApi(req, testEnv, url);
-        expect(res.status).toBe(404);
-    });
-});
-
-describe('handleFaviconAsset', () => {
-    it('returns null for a path with no matching asset', () => {
-        expect(handleFaviconAsset('/nope.png')).toBeNull();
-    });
-
-    it('serves a known favicon with the right content-type and bytes', async () => {
-        const res = handleFaviconAsset('/favicon.svg');
-        expect(res).not.toBeNull();
-        expect(res!.headers.get('content-type')).toBe('image/svg+xml');
-        expect(res!.headers.get('cache-control')).toContain('max-age');
-        const text = await res!.text();
-        expect(text).toContain('<svg');
-    });
-});
-
-describe('default export fetch routing', () => {
-    it('requires Basic Auth on /dashboard/token-usage', async () => {
-        const req = new Request('https://x/dashboard/token-usage');
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(401);
-    });
-
-    it('serves the dashboard HTML with correct credentials', async () => {
-        const req = new Request('https://x/dashboard/token-usage', {
-            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(200);
-        expect(res.headers.get('content-type')).toContain('text/html');
-        expect(await res.text()).toContain('HercuIT Burnrate');
-    });
-
-    it('rejects non-GET on /dashboard/token-usage', async () => {
-        const req = new Request('https://x/dashboard/token-usage', { method: 'POST' });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(405);
-    });
-
-    it('requires Basic Auth on /api/token-usage/*', async () => {
-        const req = new Request('https://x/api/token-usage/projects');
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(401);
-    });
-
-    it('rejects non-GET on /api/token-usage/*', async () => {
-        const req = new Request('https://x/api/token-usage/projects', {
-            method: 'POST',
-            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(405);
-    });
-
-    it('dispatches /v1/metrics to the ingest handler', async () => {
-        const req = new Request('https://x/v1/metrics', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${testEnv.INGEST_SECRET_TOKEN}` },
-            body: '{}',
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(await res.json()).toEqual({ success: true, count: 0 });
-    });
-
-    it('dispatches /v1/logs to the ingest handler', async () => {
-        const req = new Request('https://x/v1/logs', {
-            method: 'POST',
-            headers: { Authorization: `Bearer ${testEnv.INGEST_SECRET_TOKEN}` },
-            body: '{}',
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(await res.json()).toEqual({ message: 'Logs acknowledged' });
-    });
-
-    it('serves an authorized /api/token-usage/* request end-to-end', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a' }], error: null });
-        const req = new Request('https://x/api/token-usage/projects', {
-            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ projects: ['a'] });
-    });
-
-    it('requires Basic Auth on /api/cost/*', async () => {
-        const req = new Request('https://x/api/cost/table');
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(401);
-    });
-
-    it('rejects non-GET on /api/cost/*', async () => {
-        const req = new Request('https://x/api/cost/table', {
-            method: 'POST',
-            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(405);
-    });
-
-    it('serves an authorized /api/cost/* request end-to-end', async () => {
-        rpc.mockResolvedValue({ data: [{ project_name: 'a', total_cost_usd: 1 }], error: null });
-        const req = new Request('https://x/api/cost/table', {
-            headers: { Authorization: basicAuthHeader('test-user', 'test-pass') },
-        });
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(200);
-        expect(await res.json()).toEqual({ rows: [{ project_name: 'a', total_cost_usd: 1 }] });
-    });
-
-    it('serves favicon assets without requiring auth', async () => {
-        const req = new Request('https://x/favicon-32.png');
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(200);
-        expect(res.headers.get('content-type')).toBe('image/png');
-    });
-
-    it('returns 404 for an unknown path', async () => {
-        const req = new Request('https://x/nope');
-        const res = await worker.fetch(req, testEnv);
-        expect(res.status).toBe(404);
-    });
-});
-
-
 describe('Codex OTLP logs and dashboard sources', () => {
     const attrs = (values: Record<string, string | number>) => Object.entries(values).map(([key, value]) => ({
         key, value: typeof value === 'string' ? { stringValue: value } : { intValue: String(value) },
@@ -893,7 +42,7 @@ describe('Codex OTLP logs and dashboard sources', () => {
         cache_write_token_count: 10, reasoning_token_count: 15, 'conversation.id': 'conversation-1', model: 'gpt-5-codex' };
     async function send(events: Record<string, string | number>[], query = '') {
         return worker.fetch(new Request('https://x/v1/logs' + query, {
-            method: 'POST', headers: { Authorization: 'Bearer test-ingest-token', 'Content-Type': 'application/json' },
+            method: 'POST', headers: { Authorization: 'Bearer brk_' + 'a'.repeat(64), 'Content-Type': 'application/json' },
             body: JSON.stringify({ resourceLogs: [{ resource: { attributes: attrs({ 'project.name': 'repo', 'host.name': 'host' }) },
                 scopeLogs: [{ logRecords: events.map((event) => ({ attributes: attrs(event) })) }] }] }),
         }), testEnv);
@@ -948,34 +97,17 @@ describe('Codex OTLP logs and dashboard sources', () => {
         ]);
     });
     it('reports Codex database failures', async () => {
-        insert.mockResolvedValueOnce({ error: { message: 'insert failed' } });
+        rpc.mockImplementation(async(name:string)=>name==='check_rate_limit'?{data:true,error:null}:{data:null,error:{message:'insert failed'}});
         const response = await send([usage]);
-        expect(response.status).toBe(500);
-        expect(await response.json()).toEqual({ error: 'insert failed' });
+        expect(response.status).toBe(503);
+        expect(await response.json()).toMatchObject({code:'database_unavailable'});
     });
     it('handles missing token fields and metadata', async () => {
         await send([{ 'event.name': 'codex.sse_event', 'event.kind': 'response.completed', output_token_count: 2 }]);
         expect(insert.mock.calls[0][0][0]).toMatchObject({ input_tokens: 0, output_tokens: 2,
             session_id: 'unknown_session', model: 'unknown_model' });
     });
-    for (const endpoint of ['token-usage/projects', 'token-usage/series', 'token-usage/table', 'cost/series', 'cost/table']) {
-        it.each(['claude', 'codex'])('filters ' + endpoint + ' by %s', async (source) => {
-            const response = await worker.fetch(new Request('https://x/api/' + endpoint + '?source=' + source,
-                { headers: { Authorization: basicAuthHeader('test-user', 'test-pass') } }), testEnv);
-            expect(response.status).toBe(200);
-            expect(rpc).toHaveBeenCalledWith('get_' + endpoint.replaceAll('-', '_').replace('/', '_'),
-                expect.objectContaining({ p_source: source }));
-        });
-        it('rejects invalid source for ' + endpoint, async () => {
-            const response = await worker.fetch(new Request('https://x/api/' + endpoint + '?source=unknown',
-                { headers: { Authorization: basicAuthHeader('test-user', 'test-pass') } }), testEnv);
-            expect(response.status).toBe(400);
-            expect(rpc).not.toHaveBeenCalled();
-        });
-    }
 });
-
-
 describe('Codex OTLP value and metadata variants', () => {
     it('accepts eventName and double values, falls back to the source project name', () => {
         const records = parseCodexLogs({ resourceLogs: [{ scopeLogs: [{ logRecords: [{
@@ -990,4 +122,143 @@ describe('Codex OTLP value and metadata variants', () => {
     it('ignores resource and scope blocks with no logs', () => {
         expect(parseCodexLogs({ resourceLogs: [{}, { scopeLogs: [{}] }] }, null)).toEqual({ records: [], rejectedLogRecords: 0 });
     });
+});
+
+describe('tenant HTTP boundary',()=>{
+ it.each(['/dashboard/token-usage','/settings'])('redirects signed-out navigation %s',async path=>{const r=await call(path);expect(r.status).toBe(303);expect(r.headers.get('location')).toBe('/sign-in');});
+ it('requires a session and removes Basic Auth/global reads',async()=>{
+  expect((await call('/api/tenants')).status).toBe(401);
+  expect((await call('/api/token-usage/table')).status).toBe(410);
+  expect((await call('/api/cost/table')).status).toBe(410);
+ });
+ it.each(['/sign-in','/invite','/dashboard/token-usage','/settings'])('serves safe HTML for %s',async path=>{
+  signedIn();const r=await call(path);expect(r.status).toBe(200);expect(r.headers.get('cache-control')).toBe('no-store');expect(await r.text()).toContain('<!doctype html>');
+ });
+ it.each(['/favicon.svg','/favicon-32.png'])('serves public asset %s',async path=>{expect((await call(path)).status).toBe(200);expect(getUser).not.toHaveBeenCalled();});
+ it('returns 404 for unknown page',async()=>{expect((await call('/missing')).status).toBe(404);});
+ it('loads memberships and safe member display data',async()=>{signedIn();expect((await call('/api/tenants')).status).toBe(200);expect((await call(`/api/tenants/${tenant}/members`)).status).toBe(200);});
+ for(const path of ['token-usage/projects','token-usage/table','token-usage/series','cost/table','cost/series']){
+  it('uses the user JWT and required tenant for '+path,async()=>{
+   signedIn();const r=await call(`/api/tenants/${tenant}/${path}?source=codex&projects=repo`);expect(r.status).toBe(200);
+   expect(rpc).toHaveBeenCalledWith('get_'+path.replaceAll('-','_').replace('/','_'),expect.objectContaining({p_tenant_id:tenant,p_source:'codex'}));
+   expect(createClient).toHaveBeenCalledWith(testEnv.SUPABASE_URL,'test-publishable',expect.objectContaining({global:{headers:{Authorization:'Bearer valid'}}}));
+   expect(createClient.mock.calls.some((c:any[])=>c[1]==='test-service')).toBe(false);
+  });
+ }
+ it('returns generic inaccessible organization errors',async()=>{signedIn();const r=await call(`/api/tenants/${other}/cost/table`);expect(r.status).toBe(404);expect(rpc).not.toHaveBeenCalledWith('get_cost_table',expect.anything());});
+ it.each(['source=bad','bucket=month','start=garbage','start=2026-02-30T00:00:00Z','start=2026-13-01T00:00:00Z','start=2026-10-29T00:00:00Z&end=2026-10-28T00:00:00Z'])('validates query %s',async query=>{signedIn();expect((await call(`/api/tenants/${tenant}/cost/table?${query}`)).status).toBe(400);});
+ it('validates organization and target UUIDs',async()=>{signedIn();expect((await call('/api/tenants/bad/members')).status).toBe(400);expect((await call(`/api/tenants/${tenant}/members/bad`,'DELETE')).status).toBe(400);});
+ it('returns stable errors for unsupported operations',async()=>{signedIn();expect((await call(`/api/tenants/${tenant}/unknown`)).status).toBe(404);});
+ it('blocks cross-origin and missing-CSRF mutations',async()=>{signedIn();expect((await call(`/api/tenants/${tenant}`,'PATCH',{name:'B'},{Origin:'https://evil.test'})).status).toBe(403);expect((await call(`/api/tenants/${tenant}`,'PATCH',{name:'B'},{'X-CSRF-Token':''})).status).toBe(403);});
+ it.each([['','PATCH',{name:'New'}],['deletion-request','POST',{confirmation:'A'}],['members/'+other,'PATCH',{role:'viewer'}],['members/'+other,'DELETE',undefined],['ingestion-keys/'+other,'DELETE',undefined],['invitations/'+other,'DELETE',undefined],['invitations','GET',undefined],['ingestion-keys','GET',undefined]] as const)('routes admin %s %s',async(path,method,body)=>{signedIn();expect((await call(`/api/tenants/${tenant}${path?'/'+path:''}`,method,body)).status).toBe(200);});
+ it('generates key entropy server-side and returns the raw key only at creation',async()=>{
+  signedIn();const r=await call(`/api/tenants/${tenant}/ingestion-keys`,'POST',{label:'Laptop',token_hash:'evil',prefix:'evil'});expect(r.status).toBe(201);const data:any=await r.json();expect(data.token).toMatch(/^brk_[0-9a-f]{64}$/);
+  const args=rpc.mock.calls.find((c:any[])=>c[0]==='manage_tenant')![1];expect(args.p_values.token_hash).toBe(await digest(data.token));expect(args.p_values.token_hash).not.toBe('evil');expect(r.headers.get('cache-control')).toBe('no-store');
+ });
+ it('reports persisted invitation delivery failures',async()=>{signedIn();const r=await call(`/api/tenants/${tenant}/invitations`,'POST',{email:'invite@example.test',role:'viewer'});expect(r.status).toBe(503);expect(await r.json()).toMatchObject({id:other,delivered:false,code:'invitation_delivery_failed'});});
+ it('sends invitation through configured authenticated HTTPS integration',async()=>{
+  signedIn();const fetcher=vi.fn().mockResolvedValue(new Response('{}'));vi.stubGlobal('fetch',fetcher);
+  const env={...testEnv,INVITATION_DELIVERY_URL:'https://mail.test/send',INVITATION_DELIVERY_TOKEN:'delivery-test'};
+  const req=new Request(`https://x/api/tenants/${tenant}/invitations/${other}/resend`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:authCookie,Origin:'https://x','X-CSRF-Token':'csrf'},body:'{}'});
+  expect((await worker.fetch(req,env)).status).toBe(201);expect(String(fetcher.mock.calls[0][0])).toBe('https://mail.test/send');expect(fetcher.mock.calls[0][1].headers.Authorization).toBe('Bearer delivery-test');expect(fetcher.mock.calls[0][1].redirect).toBe('error');
+ });
+ it('accepts a hashed invitation token and validates shape',async()=>{signedIn();expect((await call('/api/invitations/accept','POST',{token:'bri_'+'c'.repeat(64)})).status).toBe(200);expect((await call('/api/invitations/accept','POST',{token:'bad'})).status).toBe(400);});
+ it('does not expose unexpected exception details',async()=>{getUser.mockRejectedValue(new Error('private-credential'));const r=await call('/api/tenants');expect(r.status).toBe(500);expect(await r.text()).not.toContain('private-credential');});
+});
+
+describe('Supabase Auth cookie lifecycle',()=>{
+ it('issues HttpOnly secure CSRF cookies without exposing tokens',async()=>{const r=await call('/api/session','GET',undefined,{Cookie:''});expect(r.status).toBe(200);expect(r.headers.get('set-cookie')).toContain('HttpOnly; Secure; SameSite=Lax');expect(await r.json()).toMatchObject({signedIn:false,csrf:expect.stringMatching(/^csrf_/)});});
+ it('refreshes an expired session, validates Auth user and preserves new cookies',async()=>{
+  getUser.mockResolvedValueOnce({data:{user:null},error:null}).mockResolvedValueOnce({data:{user:{id:other}},error:null});
+  refreshSession.mockResolvedValue({data:{session:{access_token:'new-access',refresh_token:'new-refresh',expires_in:3600}},error:null});
+  const r=await call('/api/session','GET',undefined,{Cookie:authCookie+'; __Host-burnrate-refresh=refresh'});expect(await r.json()).toMatchObject({signedIn:true});expect(r.headers.get('set-cookie')).toContain('new-access');
+ });
+ it('clears invalid sessions',async()=>{const r=await call('/api/session');expect(r.headers.get('set-cookie')).toContain('Max-Age=0');});
+ it('fails safely during Auth outage',async()=>{getUser.mockResolvedValue({data:{user:null},error:{status:503}});expect((await call('/api/session')).status).toBe(503);});
+ it('handles refresh outage',async()=>{refreshSession.mockResolvedValue({data:{session:null},error:{status:503}});expect((await call('/api/session','GET',undefined,{Cookie:'__Host-burnrate-refresh=refresh'})).status).toBe(503);});
+ it('sends generic OTP response and verifies emailed code',async()=>{expect((await call('/auth/sign-in','POST',{email:'a@example.test'})).status).toBe(200);const r=await call('/auth/verify','POST',{email:'a@example.test',code:'123456'});expect(r.status).toBe(200);expect(r.headers.get('set-cookie')).toContain('__Host-burnrate-access=access');expect(await r.text()).not.toContain('refresh');});
+ it.each([['/auth/sign-in',{email:'bad'},400],['/auth/verify',{email:'a@example.test',code:'x'},400]])('validates %s',async(path,body,status)=>{expect((await call(path as string,'POST',body)).status).toBe(status);});
+ it('rejects expired OTP and reports sign-in outages',async()=>{verifyOtp.mockResolvedValue({data:{session:null},error:{message:'expired'}});expect((await call('/auth/verify','POST',{email:'a@example.test',code:'123456'})).status).toBe(401);signInWithOtp.mockResolvedValue({error:{status:503}});expect((await call('/auth/sign-in','POST',{email:'a@example.test'})).status).toBe(503);});
+ it('signs out and clears local cookies',async()=>{const r=await call('/auth/sign-out','POST',{});expect(r.status).toBe(200);expect(r.headers.get('set-cookie')).toContain('Max-Age=0');expect(signOut).toHaveBeenCalledWith('valid','local');});
+ it('requires POST for Auth mutations',async()=>{expect((await call('/auth/verify')).status).toBe(405);});
+});
+
+describe('bounded, tenant-key ingestion',()=>{
+ const bearer={Authorization:'Bearer brk_'+'a'.repeat(64)};
+ it('authenticates empty metrics through a narrow service RPC',async()=>{const r=await call('/v1/metrics','POST',{},bearer);expect(r.status).toBe(200);expect(rpc).toHaveBeenCalledWith('ingest_telemetry',{p_token_hash:await digest('brk_'+'a'.repeat(64)),p_rows:[]});});
+ it('rejects global/unknown keys and read methods',async()=>{expect((await call('/v1/metrics','POST',{}, {Authorization:'Bearer old-shared-key'})).status).toBe(401);expect((await call('/v1/logs')).status).toBe(405);});
+ it('propagates revoked key rejection without leaking details',async()=>{rpc.mockImplementation(async(name:string)=>name==='check_rate_limit'?{data:true,error:null}:{data:null,error:{code:'PT401',message:'Unauthorized'}});expect((await call('/v1/metrics','POST',{},bearer)).status).toBe(401);});
+ it('enforces distributed limits',async()=>{rpc.mockResolvedValue({data:false,error:null});expect((await call('/v1/metrics','POST',{},bearer)).status).toBe(429);});
+ it('reports limiter database outages',async()=>{rpc.mockResolvedValue({data:null,error:{message:'private'}});expect((await call('/v1/metrics','POST',{},bearer)).status).toBe(503);});
+ it('bounds streaming request body and validates JSON/content type',async()=>{
+  expect((await call('/v1/metrics','POST',{huge:'a'.repeat(1048576)},bearer)).status).toBe(413);
+  expect((await call('/v1/metrics','POST',{}, {...bearer,'Content-Type':'text/plain'})).status).toBe(415);
+  const r=await worker.fetch(new Request('https://x/v1/metrics',{method:'POST',headers:{...bearer,'Content-Type':'application/json'},body:'invalid'}),testEnv);expect(r.status).toBe(400);
+ });
+ it('rejects more than 5000 normalized rows',async()=>{
+  const records=Array.from({length:5001},()=>({asInt:'1',attributes:[{key:'type',value:{stringValue:'input'}}]}));
+  expect((await call('/v1/metrics','POST',{resourceMetrics:[{scopeMetrics:[{metrics:[{name:'claude_code.token.usage',sum:{dataPoints:records}}]}]}]},bearer)).status).toBe(413);
+ });
+});
+
+describe('validation helpers',()=>{
+ it.each(['22023','23514','22P02','22007','22008','22003'])('maps field SQLSTATE %s',code=>expect(()=>databaseError({code})).toThrow(ApiError));
+ it.each(['PT401','PT403','PT404','PT409','PT413','23505','unknown'])('maps SQLSTATE %s safely',code=>expect(()=>databaseError({code})).toThrow(ApiError));
+ it('generates random opaque tokens and validates UUID',()=>{expect(randomToken('brk_')).not.toBe(randomToken('brk_'));expect(uuid(tenant)).toBe(tenant);});
+ it('rejects no body or nonobject JSON',async()=>{await expect(readJson(new Request('https://x',{headers:{'Content-Type':'application/json'}}))).rejects.toThrow(ApiError);await expect(readJson(new Request('https://x',{method:'POST',headers:{'Content-Type':'application/json'},body:'[]'}))).rejects.toThrow(ApiError);});
+ it('preserves valid query dates and project filters',()=>{expect(dashboardArguments(new URL('https://x?projects=a,%20b,,&start=2026-01-01T00:00:00Z&end=2026-02-01T00:00:00Z&bucket=week'),tenant)).toMatchObject({p_projects:['a','b'],p_bucket:'week',p_start:'2026-01-01T00:00:00Z'});});
+});
+
+
+describe('additional auth and payload regressions',()=>{
+ it('reports Auth transport errors without clearing valid refresh cookies',async()=>{getUser.mockResolvedValue({data:{user:null},error:{status:0}});const r=await call('/api/session');expect(r.status).toBe(503);expect(r.headers.get('set-cookie')).toBeNull();});
+ it('reports OTP verification outages',async()=>{verifyOtp.mockResolvedValue({data:{session:null},error:{status:503}});expect((await call('/auth/verify','POST',{email:'a@example.test',code:'123456'})).status).toBe(503);});
+ it('rejects malformed OTLP array shapes',async()=>{expect((await call('/v1/metrics','POST',{resourceMetrics:{}},{Authorization:'Bearer brk_'+'a'.repeat(64)})).status).toBe(400);});
+ it('validates administrative value types',async()=>{signedIn();expect((await call(`/api/tenants/${tenant}`,'PATCH',{name:{bad:true}})).status).toBe(400);expect((await call(`/api/tenants/${tenant}/ingestion-keys`,'POST',{label:'label',expires_at:'bad-date'})).status).toBe(400);});
+});
+
+
+describe('local logout during upstream failure',()=>{
+ it('clears cookies even when Auth cannot validate or revoke the session',async()=>{getUser.mockRejectedValue(new Error('offline'));signOut.mockRejectedValue(new Error('offline'));const r=await call('/auth/sign-out','POST',{});expect(r.status).toBe(200);expect(r.headers.get('set-cookie')).toContain('Max-Age=0');expect(getUser).not.toHaveBeenCalled();});
+ it('clears cookies when remote logout returns an Auth error',async()=>{signOut.mockResolvedValue({error:{status:503}});expect((await call('/auth/sign-out','POST',{})).status).toBe(200);});
+});
+
+describe('review regression checks',()=>{
+ it('refreshes a refresh-only session before remote logout',async()=>{
+  refreshSession.mockResolvedValue({data:{session:{access_token:'fresh-access',refresh_token:'rotated'}},error:null});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:'__Host-burnrate-refresh=refresh; __Host-burnrate-csrf=csrf'});
+  expect(r.status).toBe(200);expect(await r.json()).toMatchObject({success:true,remoteRevoked:true});
+  expect(refreshSession).toHaveBeenCalledWith({refresh_token:'refresh'});expect(signOut).toHaveBeenCalledWith('fresh-access','local');
+  expect(r.headers.get('set-cookie')).toContain('Max-Age=0');expect(getUser).not.toHaveBeenCalled();
+ });
+ it('distinguishes local cookie clearing from failed remote revocation',async()=>{
+  refreshSession.mockRejectedValue(new Error('offline'));signOut.mockResolvedValue({error:{status:503}});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:authCookie+'; __Host-burnrate-refresh=refresh'});
+  expect(await r.json()).toMatchObject({success:true,remoteRevoked:false});expect(r.headers.get('set-cookie')).toContain('Max-Age=0');
+ });
+ it('does not claim remote revocation when refresh-only recovery fails',async()=>{
+  refreshSession.mockResolvedValue({data:{session:null},error:{status:400}});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:'__Host-burnrate-refresh=invalid; __Host-burnrate-csrf=csrf'});
+  expect(await r.json()).toMatchObject({success:true,remoteRevoked:false});expect(signOut).not.toHaveBeenCalled();
+ });
+ it.each([['ingestion-keys', 'POST'],['','PATCH']] as const)('rejects missing required administration fields on %s',async(path,method)=>{
+  signedIn();const r=await call(`/api/tenants/${tenant}${path?'/'+path:''}`,method,{});expect(r.status).toBe(400);
+  expect(rpc.mock.calls.some((c:any[])=>c[0]==='manage_tenant')).toBe(false);
+ });
+ it.each(['not a valid URL','http://mail.test/send'])('returns persisted delivery failure for endpoint %s',async endpoint=>{
+  signedIn();const request=new Request(`https://x/api/tenants/${tenant}/invitations`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:authCookie,Origin:'https://x','X-CSRF-Token':'csrf'},body:JSON.stringify({email:'invite@example.test',role:'viewer'})});
+  const r=await worker.fetch(request,{...testEnv,INVITATION_DELIVERY_URL:endpoint,INVITATION_DELIVERY_TOKEN:'test'});
+  expect(r.status).toBe(503);expect(await r.json()).toMatchObject({id:other,code:'invitation_delivery_failed',delivered:false});
+ });
+ it('reports the actual smaller request-body limit',async()=>{
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test',padding:'x'.repeat(8192)});expect(r.status).toBe(413);
+  const body:any=await r.json();expect(body.error).toContain('8192');expect(body.error).not.toContain('1 MiB');
+ });
+ it('adds security and request headers to cacheable favicons',async()=>{
+  const r=await call('/favicon.svg');expect(r.headers.get('x-content-type-options')).toBe('nosniff');expect(r.headers.get('referrer-policy')).toBe('no-referrer');expect(r.headers.get('x-request-id')).toBeTruthy();expect(r.headers.get('cache-control')).toBe('public, max-age=86400');
+ });
+ it('returns Claude partial-success counts and inserts only valid points',async()=>{
+  const r=await call('/v1/metrics','POST',{resourceMetrics:[{scopeMetrics:[{metrics:[{name:'claude_code.token.usage',sum:{dataPoints:[{asInt:'NaN',attributes:[{key:'type',value:{stringValue:'input'}}]},{asInt:'7',attributes:[{key:'type',value:{stringValue:'input'}}]}]}}]}]}]}, {Authorization:'Bearer brk_'+'a'.repeat(64)});
+  expect(r.status).toBe(200);expect(await r.json()).toMatchObject({count:1,partialSuccess:{rejectedDataPoints:'1'}});expect(insert.mock.calls[0][0]).toHaveLength(1);
+ });
 });

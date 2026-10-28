@@ -28,4 +28,16 @@ jobs:
 
       - run: supabase link --project-ref "$SUPABASE_PROJECT_ID"
 
+      - name: Refuse the legacy all-at-once tenancy cutover
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview="$(mktemp)"
+          trap 'rm -f "$preview"' EXIT
+          supabase db push --dry-run >"$preview" 2>&1
+          if grep -q '20261028210000' "$preview"; then
+            echo "The tenancy cutover is pending. Run scripts/stage-tenancy.mjs in the approved maintenance window, verify historical totals, and explicitly repair migration 20261028210000 as applied. See docs/tenancy-operations.md."
+            exit 1
+          fi
+
       - run: supabase db push

@@ -5,23 +5,47 @@ on:
     branches:
       - main
     paths:
-      - "index.ts"
-      - "dashboard.ts"
+      - "*.ts"
+      - "scripts/**"
+      - "tests/**"
+      - "tsconfig.json"
       - "wrangler.toml"
       - "package.json"
       - "package-lock.json"
       - "supabase/migrations/**"
       - ".github/workflows/deploy-worker.yml"
       - ".github/workflows/deploy-migrations.yml"
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 # Keep the migration and Worker deployment from different releases serialized.
 concurrency:
-  group: production-deployment
+  group: ${{ github.event_name == 'pull_request' && format('pr-validation-{0}', github.event.pull_request.number) || 'production-deployment' }}
   cancel-in-progress: false
 
 jobs:
+  validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run test:database
+      - run: npm run test:dashboard
+      - run: npx tsc --noEmit
+      - run: npx wrangler deploy --dry-run
+        env:
+          WRANGLER_SEND_METRICS: "false"
+
   migrations:
+    if: github.event_name != 'pull_request'
+    needs: validation
     uses: ./.github/workflows/deploy-migrations.yml
     secrets:
       SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
@@ -29,6 +53,7 @@ jobs:
       SUPABASE_PROJECT_ID: ${{ secrets.SUPABASE_PROJECT_ID }}
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: migrations
     runs-on: ubuntu-latest
 
