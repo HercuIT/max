@@ -1,3 +1,4 @@
+import { UIStrings } from './ui-strings';
 import type { Session } from './auth';
 import { ApiError, databaseError, digest, isTimestamp, jsonResponse, randomToken, readJson, uuid } from './http';
 import type { Env } from './types';
@@ -11,29 +12,29 @@ export function dashboardArguments(url: URL, tenantId: string) {
     const query = url.searchParams;
     const source = query.get('source');
     const bucket = query.get('bucket') || 'day';
-    if (source && !['claude', 'codex'].includes(source)) throw new ApiError(400, 'invalid_source', 'Choose Claude, Codex, or all sources.');
-    if (!['hour', 'day', 'week'].includes(bucket)) throw new ApiError(400, 'invalid_bucket', 'Choose hour, day, or week.');
+    if (source && !['claude', 'codex'].includes(source)) throw new ApiError(400, 'invalid_source', UIStrings.text.invalidSource);
+    if (!['hour', 'day', 'week'].includes(bucket)) throw new ApiError(400, 'invalid_bucket', UIStrings.text.invalidBucket);
     const start = query.get('start'), end = query.get('end');
     for (const value of [start, end]) {
         if (value && !isTimestamp(value)) {
-            throw new ApiError(400, 'invalid_date', 'Use ISO timestamps for start and end.');
+            throw new ApiError(400, 'invalid_date', UIStrings.text.invalidDate);
         }
     }
-    if (start && end && Date.parse(start) > Date.parse(end)) throw new ApiError(400, 'invalid_range', 'Start must be before end.');
+    if (start && end && Date.parse(start) > Date.parse(end)) throw new ApiError(400, 'invalid_range', UIStrings.text.invalidRange);
     const projects = query.get('projects')?.split(',').map(x => x.trim()).filter(Boolean);
     return { p_tenant_id: tenantId, ...(source ? { p_source: source } : {}),
         p_projects: projects?.length ? projects : null, ...(start ? { p_start: start } : {}), ...(end ? { p_end: end } : {}), p_bucket: bucket };
 }
 async function deliverInvitation(env: Env, email: string, token: string): Promise<boolean> {
     if (!env.INVITATION_DELIVERY_URL || !env.INVITATION_DELIVERY_TOKEN) return false;
-    const endpoint = new URL(env.INVITATION_DELIVERY_URL);
-    if (endpoint.protocol !== 'https:') return false;
     try {
+        const endpoint = new URL(env.INVITATION_DELIVERY_URL);
+        if (endpoint.protocol !== 'https:') return false;
         // A fragment never reaches the web server/referrer. The landing page removes it immediately.
         const response = await fetch(endpoint, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(10000),
             headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${env.INVITATION_DELIVERY_TOKEN}` },
-            body: JSON.stringify({ to: email, subject: 'Your HercuIT Burnrate invitation',
-                text: `Sign in with this email, then accept your organization invitation: ${env.APP_ORIGIN}/invite#${token}` }) });
+            body: JSON.stringify({ to: email, subject: UIStrings.text.invitationSubject,
+                text: UIStrings.format(UIStrings.text.invitationEmail, { url: `${env.APP_ORIGIN}/invite#${token}` }) }) });
         return response.ok;
     } catch { return false; } // Caller reports the persisted invitation and actionable delivery failure.
 }
@@ -42,15 +43,15 @@ export async function handleTenantApi(request: Request, env: Env, session: Sessi
     if (url.pathname === '/api/tenants' && request.method === 'GET') return jsonResponse({ tenants: await rpc(session, 'list_tenants') ?? [] });
     if (url.pathname === '/api/invitations/accept' && request.method === 'POST') {
         const body = await readJson(request, 8192);
-        if (typeof body.token !== 'string' || !/^bri_[0-9a-f]{64}$/.test(body.token)) throw new ApiError(400, 'invalid_invitation', 'Use the complete invitation link from your email.');
+        if (typeof body.token !== 'string' || !/^bri_[0-9a-f]{64}$/.test(body.token)) throw new ApiError(400, 'invalid_invitation', UIStrings.text.invalidInvitation);
         const id = await rpc(session, 'accept_tenant_invitation', { p_token_hash: await digest(body.token), p_request_id: requestId });
         return jsonResponse({ tenantId: id });
     }
     const match = /^\/api\/tenants\/([^/]+)(?:\/(.*))?$/.exec(url.pathname);
-    if (!match) throw new ApiError(404, 'not_found', 'Page not found.');
+    if (!match) throw new ApiError(404, 'not_found', UIStrings.text.notFound);
     const tenantId = uuid(match[1]);
     const memberships = await rpc(session, 'list_tenants') ?? [];
-    if (!memberships.some((t: { id: string }) => t.id === tenantId)) throw new ApiError(404, 'not_found', 'Organization not found. Choose another organization.');
+    if (!memberships.some((t: { id: string }) => t.id === tenantId)) throw new ApiError(404, 'not_found', UIStrings.text.organizationNotFound);
     const path = match[2] || '';
     const method = request.method;
     if (/^(token-usage\/(projects|table|series)|cost\/(table|series))$/.test(path) && method === 'GET') {
@@ -73,16 +74,22 @@ export async function handleTenantApi(request: Request, env: Env, session: Sessi
     else if (/^members\/[^/]+$/.test(path) && ['DELETE', 'PATCH'].includes(method)) { action = method === 'DELETE' ? 'members.remove' : 'members.update'; target = path.split('/')[1]; }
     else if (!path && method === 'PATCH') action = 'rename';
     else if (path === 'deletion-request' && method === 'POST') action = 'deletion-request';
-    else throw new ApiError(404, 'not_found', 'Operation not found.');
+    else throw new ApiError(404, 'not_found', UIStrings.text.notFound);
     if (target) uuid(target);
     const body = ['POST', 'PATCH'].includes(method) ? await readJson(request, 8192) : {};
     // Never forward caller-controlled hash/prefix fields or arbitrary database values.
     const values: Record<string, unknown> = {};
     for (const key of ['label', 'expires_at', 'email', 'role', 'name', 'confirmation']) if (body[key] !== undefined) values[key] = body[key];
-    for (const [name, value] of Object.entries(values)) {
-        if (typeof value !== 'string' || value.trim() === '') throw new ApiError(400, 'invalid_fields', `Supply a non-empty ${name}.`);
+    const required = action === 'keys.create' ? ['label'] : action === 'rename' ? ['name'] : [];
+    for (const name of required) {
+        if (typeof values[name] !== 'string' || (values[name] as string).trim() === '') {
+            throw new ApiError(400, 'invalid_fields', UIStrings.format(UIStrings.text.nonEmptyField, { name }));
+        }
     }
-    if (values.expires_at && !isTimestamp(values.expires_at as string)) throw new ApiError(400, 'invalid_expiry', 'Use a valid ISO key expiry date.');
+    for (const [name, value] of Object.entries(values)) {
+        if (typeof value !== 'string' || value.trim() === '') throw new ApiError(400, 'invalid_fields', UIStrings.format(UIStrings.text.nonEmptyField, { name }));
+    }
+    if (values.expires_at && !isTimestamp(values.expires_at as string)) throw new ApiError(400, 'invalid_expiry', UIStrings.text.invalidExpiry);
     let rawToken: string | undefined;
     if (action === 'keys.create' || action === 'invitations.create' || action === 'invitations.resend') {
         rawToken = randomToken(action === 'keys.create' ? 'brk_' : 'bri_');
@@ -95,7 +102,7 @@ export async function handleTenantApi(request: Request, env: Env, session: Sessi
     if (action === 'invitations.create' || action === 'invitations.resend') {
         const delivered = await deliverInvitation(env, data.email, rawToken!);
         return jsonResponse({ id: data.id, delivered, ...(delivered ? {} : { code: 'invitation_delivery_failed',
-            error: 'The invitation was created, but the email could not be sent. Retry delivery or revoke it.' }) }, delivered ? 201 : 503);
+            error: UIStrings.text.invitationDeliveryFailed }) }, delivered ? 201 : 503);
     }
     return jsonResponse(action.endsWith('.list') ? { [action.startsWith('keys') ? 'keys' : 'invitations']: data } : { success: true });
 }

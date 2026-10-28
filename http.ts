@@ -1,3 +1,4 @@
+import { UIStrings } from './ui-strings';
 import { createClient } from '@supabase/supabase-js';
 import type { Env } from './types';
 
@@ -20,7 +21,7 @@ export function randomToken(prefix: string): string {
 }
 export function uuid(value: string): string {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) {
-        throw new ApiError(400, 'invalid_id', 'Supply a valid organization or object UUID.');
+        throw new ApiError(400, 'invalid_id', UIStrings.text.invalidId);
     }
     return value;
 }
@@ -31,10 +32,10 @@ export function isTimestamp(value: string): boolean {
 }
 export async function readJson(request: Request, maxBytes = 1024 * 1024): Promise<any> {
     if (!request.headers.get('Content-Type')?.toLowerCase().startsWith('application/json')) {
-        throw new ApiError(415, 'json_required', 'Send Content-Type: application/json.');
+        throw new ApiError(415, 'json_required', UIStrings.text.jsonRequired);
     }
     const reader = request.body?.getReader();
-    if (!reader) throw new ApiError(400, 'invalid_json', 'Send a JSON body.');
+    if (!reader) throw new ApiError(400, 'invalid_json', UIStrings.text.invalidJson);
     let size = 0;
     const decoder = new TextDecoder();
     let text = '';
@@ -43,7 +44,7 @@ export async function readJson(request: Request, maxBytes = 1024 * 1024): Promis
             const { value, done } = await reader.read();
             if (done) break;
             size += value.length;
-            if (size > maxBytes) { await reader.cancel(); throw new ApiError(413, 'payload_too_large', 'Maximum request size is 1 MiB.'); }
+            if (size > maxBytes) { await reader.cancel(); throw new ApiError(413, 'payload_too_large', UIStrings.format(UIStrings.text.payloadTooLarge, { maxBytes })); }
             text += decoder.decode(value, { stream: true });
         }
         text += decoder.decode();
@@ -52,22 +53,22 @@ export async function readJson(request: Request, maxBytes = 1024 * 1024): Promis
         return result;
     } catch (error) {
         if (error instanceof ApiError) throw error;
-        throw new ApiError(400, 'invalid_json', 'Send a valid JSON object.');
+        throw new ApiError(400, 'invalid_json', UIStrings.text.invalidJson);
     } finally { reader.releaseLock(); }
 }
 export function databaseError(error: { code?: string; message?: string }): never {
     const status = /^PT(401|403|404|409|413)$/.exec(error.code ?? '');
-    if (status) throw new ApiError(Number(status[1]), 'request_rejected', error.message ?? 'Request rejected.');
+    if (status) throw new ApiError(Number(status[1]), 'request_rejected', UIStrings.databaseMessage(error.message));
     if (['22023', '23514', '22P02', '22007', '22008', '22003'].includes(error.code ?? '')) {
-        throw new ApiError(400, 'invalid_fields', 'Check the supplied names, roles, dates, and usage values.');
+        throw new ApiError(400, 'invalid_fields', UIStrings.text.invalidFields);
     }
-    if (error.code === '23505') throw new ApiError(409, 'already_exists', 'This record already exists.');
-    throw new ApiError(503, 'database_unavailable', 'The database could not complete this operation. Retry shortly.');
+    if (error.code === '23505') throw new ApiError(409, 'already_exists', UIStrings.text.alreadyExists);
+    throw new ApiError(503, 'database_unavailable', UIStrings.text.databaseUnavailable);
 }
 export async function rateLimit(env: Env, scope: string, identity: string, limit: number, seconds = 60) {
     const { data, error } = await serviceClient(env).rpc('check_rate_limit', {
         p_key_hash: await digest(scope + ':' + identity), p_limit: limit, p_window_seconds: seconds,
     });
     if (error) databaseError(error);
-    if (data !== true) throw new ApiError(429, 'rate_limited', 'Too many requests. Wait a minute and try again.');
+    if (data !== true) throw new ApiError(429, 'rate_limited', UIStrings.text.rateLimited);
 }

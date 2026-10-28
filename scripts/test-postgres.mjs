@@ -1,29 +1,20 @@
 // Optional live PostgreSQL test. Refuses initialized databases; never points this at production.
 import pg from 'pg';
-import fs from 'node:fs';
+import { assertFreshDatabase, fixtureAssertions, setupFixture } from './database-fixture.mjs';
 import assert from 'node:assert/strict';
 const url=process.env.TEST_DATABASE_URL;
 if(!url)throw new Error('Set TEST_DATABASE_URL to a new disposable PostgreSQL database.');
 const db=new pg.Client({connectionString:url});await db.connect();
-if((await db.query("select to_regclass('public.token_usage_logs') as usage,to_regclass('auth.users') as users")).rows.some(r=>r.usage||r.users))throw new Error('Refusing an initialized database. Use a new disposable database.');
-await db.query(`do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role; end if; end $$;
- create schema auth;create table auth.users(id uuid primary key,email text,email_confirmed_at timestamptz,raw_user_meta_data jsonb default '{}');
- create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$;
- grant usage on schema auth,public to anon,authenticated,service_role;grant execute on function auth.uid() to authenticated;
- alter default privileges in schema public grant all on tables to anon,authenticated,service_role;`);
-const root=new URL('../supabase/migrations/',import.meta.url);
-for(const name of fs.readdirSync(root).sort()){
- if(name.includes('multi_tenancy'))await db.query("insert into public.token_usage_logs(project_name,session_id,input_tokens,source) values ('legacy-repo','old-session',9,'claude')");
- await db.query(fs.readFileSync(new URL(name,root),'utf8'));
-}
-let assertions=fs.readFileSync(new URL('../tests/tenancy.sql',import.meta.url),'utf8');
-assertions=assertions.replace('-- SOURCE_FILTER_ASSERTIONS',fs.readFileSync(new URL('../tests/source-filter.sql',import.meta.url),'utf8'));
-await db.query(assertions);
+const clients = [db];
+try {
+await assertFreshDatabase(sql => db.query(sql));
+await setupFixture(sql => db.query(sql));
+await db.query(fixtureAssertions());
 await db.query(`insert into auth.users values ('20000000-0000-4000-8000-000000000001','one@example.test',now(),'{}'),('20000000-0000-4000-8000-000000000002','two@example.test',now(),'{}');`);
 const one='20000000-0000-4000-8000-000000000001',two='20000000-0000-4000-8000-000000000002';
 const tenant=(await db.query("select public.bootstrap_tenant('Concurrent',$1)",[one])).rows[0].bootstrap_tenant;
 await db.query("insert into public.tenant_memberships(tenant_id,user_id,role) values($1,$2,'owner')",[tenant,two]);
-const c1=new pg.Client({connectionString:url}),c2=new pg.Client({connectionString:url});await c1.connect();await c2.connect();
+const c1=new pg.Client({connectionString:url}),c2=new pg.Client({connectionString:url});clients.push(c1,c2);await c1.connect();await c2.connect();
 async function begin(c,user,role='authenticated'){await c.query('begin');await c.query('set local statement_timeout=5000');await c.query('set local role '+role);if(user)await c.query("select set_config('request.jwt.claim.sub',$1,true)",[user]);}
 async function waitForLock(client){
  const pid=(await client.query('select pg_backend_pid()')).rows[0].pg_backend_pid;
@@ -50,4 +41,6 @@ await db.query(`insert into public.token_usage_logs(tenant_id,project_id,project
 await db.query('analyze public.token_usage_logs');
 const plan=await db.query('explain (analyze,buffers,format json) select * from public.token_usage_logs where tenant_id=$1 and source=$2 and recorded_at>=now()-interval \'7 days\'',[tenant,'codex']);
 console.log('PASS: PostgreSQL full isolation suite, concurrent last-owner removal, revoked-key transaction ordering; 10k-row filtered query execution ms:',plan.rows[0]['QUERY PLAN'][0]['Execution Time']);
-await c1.end();await c2.end();await db.end();
+} finally {
+    await Promise.all(clients.map(client => client.end()));
+}

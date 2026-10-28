@@ -19,7 +19,9 @@ try{
  const current=await user.auth.getUser(verified.data.session.access_token);assert.equal(current.error,null);assert.equal(current.data.user.id,id);
  const refreshed=await user.auth.refreshSession({refresh_token:verified.data.session.refresh_token});assert.equal(refreshed.error,null);assert(refreshed.data.session);
  const invalid=await user.auth.getUser('not-a-valid-jwt');assert(invalid.error);
+ // Despite its SDK namespace, signOut(jwt) calls the user-authenticated /logout endpoint.
+ // Preserve this public-client test: /logout must revoke the supplied user's session.
  const logout=await user.auth.admin.signOut(refreshed.data.session.access_token,'local');assert.equal(logout.error,null);
- const after=await user.auth.refreshSession({refresh_token:refreshed.data.session.refresh_token});assert(after.error);
- console.log('PASS: official Supabase Auth email OTP verification, validated identity, refresh, invalid JWT rejection, and refresh revocation on local sign-out');
-}finally{if(id)await admin.auth.admin.deleteUser(id);}
+ const after=await user.auth.refreshSession({refresh_token:refreshed.data.session.refresh_token});assert(after.error);assert(after.error.status>=400&&after.error.status<500,'Refresh must be rejected by Auth, not fail from a transport/server error.');
+}finally{if(id){const cleanup=await admin.auth.admin.deleteUser(id);assert.equal(cleanup.error,null,'Synthetic Auth user cleanup failed.');}}
+console.log('PASS: official Supabase Auth email OTP verification, validated identity, refresh, invalid JWT rejection, and refresh revocation on local sign-out');

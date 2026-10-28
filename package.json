@@ -9,7 +9,8 @@
     "test:database": "node scripts/test-database.mjs",
     "test:dashboard": "node scripts/test-dashboard.mjs",
     "test:postgres": "node scripts/test-postgres.mjs",
-    "test:auth-live": "node scripts/test-auth-live.mjs"
+    "test:auth-live": "node scripts/test-auth-live.mjs",
+    "test:staged": "node scripts/test-staged-tenancy.mjs"
   },
   "keywords": [],
   "author": "",

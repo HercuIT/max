@@ -4,14 +4,38 @@ This is a breaking, fail-closed authorization cutover. Preparing code/tests does
 
 ## Before migration
 
-1. Back up the database and rehearse restore and migrations on a disposable copy. Record usage counts, per-project/source token sums and cost totals, and project names. Review table size and available lock/disk headroom; the current cutover migration backfills in one transaction. For very large production tables, split expansion/backfill/constraint validation into bounded migration phases before deploying; do not run a long unmeasured transaction on a live write-heavy table.
+1. Back up the database and rehearse restore and migrations on a disposable copy. Record usage counts, per-project/source token sums and cost totals, and project names. Review table size and available lock/disk headroom. The committed all-at-once migration is retained as immutable history, but automatic deployment now refuses to apply it while pending. Use the staged procedure below for historical databases; never run its original large transaction against production.
 2. Provision Supabase Auth email OTP delivery, exact application origins, site URL and email template (`{{ .Token }}`). Identify the legacy owner's verified Auth UUID through an operator-controlled process. Never derive ownership from telemetry attributes or the first visitor.
 3. Configure `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_ORIGIN`, and optionally the authenticated invitation delivery integration. Provide secret values securely through Worker/environment settings. No values are supplied by these docs.
 4. Pause legacy exporters/writes. Do not add a second tenant until schema, authorization, user sessions, and key cutover are validated. The previous Worker cannot write the new non-null tenant/project fields or call the new required-tenant RPC signatures.
 
 ## Migration and explicit ownership
 
-Apply the complete migration history through Supabase CLI (`supabase link` then `supabase db push`) or the controlled CI pipeline. The tenancy migration creates the legacy tenant with UUID `00000000-0000-4000-8000-000000000001`, assigns existing projects and usage to it, creates missing projects, and enforces composite tenant/project foreign keys. It creates **no membership or exporter key**. Until claimed, no ordinary user can read this tenant.
+First verify that all migration versions **before** `20261028210000` are recorded as applied. If any are pending, deploy the preceding release package containing only that earlier history before starting this procedure. Check the pending version list before execution; do not run an unrestricted push of the current package while this cutover is pending. CI’s migration-preview preflight intentionally stops such a push.
+
+The existing `20261028210000_multi_tenancy.sql` is not rewritten: it may already be recorded in another environment. For a database where it is pending, run its staged equivalent with an owner-level database connection supplied securely (never paste the connection string into logs):
+
+```sh
+node scripts/stage-tenancy.mjs --confirm-maintenance --batch-size=5000 --statement-timeout-ms=60000
+```
+
+Set `TENANCY_DATABASE_URL` in the operator's secure environment before running. The script requires an explicit maintenance confirmation, takes a singleton advisory lock, and refuses an existing tenant schema without its own matching checksum/progress record. It performs these independently committed phases:
+
+1. Add nullable tenant/project columns and `NOT VALID` tenant foreign keys; create the new empty tenant/private tables. Existing data is not scanned while taking the expansion locks.
+2. Assign historical projects and resolve/create projects for usage in bounded batches (default 5,000 rows, maximum 10,000). Each batch commits independently. A private checksum/progress record permits restart after interruption without reassigning completed rows. Keep legacy writers paused throughout; project-name uniqueness stays global until cutover.
+3. Build the two unique tenant/project indexes and three usage indexes with `CREATE INDEX CONCURRENTLY`, outside transaction blocks. Interrupted invalid indexes are removed concurrently before a retry.
+4. Attach the prebuilt unique indexes, add not-null checks and the composite foreign key as `NOT VALID`, and validate each constraint in its own transaction. Validated checks let the later `SET NOT NULL` use a brief catalog lock rather than another full table scan. Every statement has an explicit timeout and every table-lock acquisition has a five-second timeout; adjust the statement timeout only after measuring the failed phase.
+5. Commit the short RLS/grant/RPC cutover, remove old aggregate signatures/global uniqueness, and verify required columns, all foreign keys, RLS, index validity and API grants. The script prints safe phase/count progress, never connection values, and does **not** modify Supabase's migration ledger.
+
+After independently comparing historical counts/per-source/project sums against the backup and reviewing the final verification, explicitly record the already-executed equivalent migration:
+
+```sh
+supabase migration repair --status applied 20261028210000 --linked
+```
+
+This is an operator attestation after schema completion, never a workaround for a failed phase. Then retry the normal CI migration/deployment workflow; the pending-cutover guard will no longer match. Environments where the immutable migration is already applied must not replay staging or repair their ledger. If its transaction is currently running, investigate its actual locks and follow the database recovery runbook rather than launching a competing migration.
+
+The staged tenancy cutover creates the legacy tenant with UUID `00000000-0000-4000-8000-000000000001`, assigns existing projects and usage to it, creates missing projects, and enforces composite tenant/project foreign keys. It creates **no membership or exporter key**. Until claimed, no ordinary user can read this tenant.
 
 As a trusted operator, supply a verified owner's UUID through a parameterized SQL client or Supabase SQL editor:
 

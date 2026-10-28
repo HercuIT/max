@@ -222,3 +222,43 @@ describe('local logout during upstream failure',()=>{
  it('clears cookies even when Auth cannot validate or revoke the session',async()=>{getUser.mockRejectedValue(new Error('offline'));signOut.mockRejectedValue(new Error('offline'));const r=await call('/auth/sign-out','POST',{});expect(r.status).toBe(200);expect(r.headers.get('set-cookie')).toContain('Max-Age=0');expect(getUser).not.toHaveBeenCalled();});
  it('clears cookies when remote logout returns an Auth error',async()=>{signOut.mockResolvedValue({error:{status:503}});expect((await call('/auth/sign-out','POST',{})).status).toBe(200);});
 });
+
+describe('review regression checks',()=>{
+ it('refreshes a refresh-only session before remote logout',async()=>{
+  refreshSession.mockResolvedValue({data:{session:{access_token:'fresh-access',refresh_token:'rotated'}},error:null});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:'__Host-burnrate-refresh=refresh; __Host-burnrate-csrf=csrf'});
+  expect(r.status).toBe(200);expect(await r.json()).toMatchObject({success:true,remoteRevoked:true});
+  expect(refreshSession).toHaveBeenCalledWith({refresh_token:'refresh'});expect(signOut).toHaveBeenCalledWith('fresh-access','local');
+  expect(r.headers.get('set-cookie')).toContain('Max-Age=0');expect(getUser).not.toHaveBeenCalled();
+ });
+ it('distinguishes local cookie clearing from failed remote revocation',async()=>{
+  refreshSession.mockRejectedValue(new Error('offline'));signOut.mockResolvedValue({error:{status:503}});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:authCookie+'; __Host-burnrate-refresh=refresh'});
+  expect(await r.json()).toMatchObject({success:true,remoteRevoked:false});expect(r.headers.get('set-cookie')).toContain('Max-Age=0');
+ });
+ it('does not claim remote revocation when refresh-only recovery fails',async()=>{
+  refreshSession.mockResolvedValue({data:{session:null},error:{status:400}});
+  const r=await call('/auth/sign-out','POST',{}, {Cookie:'__Host-burnrate-refresh=invalid; __Host-burnrate-csrf=csrf'});
+  expect(await r.json()).toMatchObject({success:true,remoteRevoked:false});expect(signOut).not.toHaveBeenCalled();
+ });
+ it.each([['ingestion-keys', 'POST'],['','PATCH']] as const)('rejects missing required administration fields on %s',async(path,method)=>{
+  signedIn();const r=await call(`/api/tenants/${tenant}${path?'/'+path:''}`,method,{});expect(r.status).toBe(400);
+  expect(rpc.mock.calls.some((c:any[])=>c[0]==='manage_tenant')).toBe(false);
+ });
+ it.each(['not a valid URL','http://mail.test/send'])('returns persisted delivery failure for endpoint %s',async endpoint=>{
+  signedIn();const request=new Request(`https://x/api/tenants/${tenant}/invitations`,{method:'POST',headers:{'Content-Type':'application/json',Cookie:authCookie,Origin:'https://x','X-CSRF-Token':'csrf'},body:JSON.stringify({email:'invite@example.test',role:'viewer'})});
+  const r=await worker.fetch(request,{...testEnv,INVITATION_DELIVERY_URL:endpoint,INVITATION_DELIVERY_TOKEN:'test'});
+  expect(r.status).toBe(503);expect(await r.json()).toMatchObject({id:other,code:'invitation_delivery_failed',delivered:false});
+ });
+ it('reports the actual smaller request-body limit',async()=>{
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test',padding:'x'.repeat(8192)});expect(r.status).toBe(413);
+  const body:any=await r.json();expect(body.error).toContain('8192');expect(body.error).not.toContain('1 MiB');
+ });
+ it('adds security and request headers to cacheable favicons',async()=>{
+  const r=await call('/favicon.svg');expect(r.headers.get('x-content-type-options')).toBe('nosniff');expect(r.headers.get('referrer-policy')).toBe('no-referrer');expect(r.headers.get('x-request-id')).toBeTruthy();expect(r.headers.get('cache-control')).toBe('public, max-age=86400');
+ });
+ it('returns Claude partial-success counts and inserts only valid points',async()=>{
+  const r=await call('/v1/metrics','POST',{resourceMetrics:[{scopeMetrics:[{metrics:[{name:'claude_code.token.usage',sum:{dataPoints:[{asInt:'NaN',attributes:[{key:'type',value:{stringValue:'input'}}]},{asInt:'7',attributes:[{key:'type',value:{stringValue:'input'}}]}]}}]}]}]}, {Authorization:'Bearer brk_'+'a'.repeat(64)});
+  expect(r.status).toBe(200);expect(await r.json()).toMatchObject({count:1,partialSuccess:{rejectedDataPoints:'1'}});expect(insert.mock.calls[0][0]).toHaveLength(1);
+ });
+});

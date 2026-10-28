@@ -9,6 +9,7 @@ This repository (`max`) serves a multi-tenant Claude/Codex telemetry dashboard t
 - `tenancy.ts`: tenant-scoped dashboard/admin APIs, invitation delivery contract.
 - `http.ts`: shared validation, body limits, credential generation/hashing, database errors and distributed rate limiting.
 - `telemetry.ts`: pure Claude metric / Codex log normalization. Other log bodies are not persisted.
+- `ui-strings.ts`: single `UIStrings` class for all application-owned UI, email, validation and error copy. Reuse existing keys before adding new wording; use parameterized templates for dynamic values. Plain-JS pages receive its generated catalog/formatter rather than a second copy source. Never inline UI wording in templates/handlers or edit historical SQL migrations just to change copy; database domain messages resolve through this catalog.
 - `dashboard.ts`, `pages.ts`: static HTML with plain browser JS inside template strings; no TypeScript/imports in the emitted scripts. Escape user-supplied text before inserting HTML.
 - `supabase/migrations/`: immutable applied history, tenant schema/RLS/RPCs, narrow service operations, role/key/invitation/deletion transactions.
 - `scripts/test-database.mjs`, `tests/tenancy.sql`, `tests/source-filter.sql`: PostgreSQL/RLS assertions including historical ownership and source filtering.
@@ -52,6 +53,7 @@ Add every new runtime/test/client environment variable to this inventory. Never 
 
 | Optional local test name | Purpose |
 | --- | --- |
+| `TENANCY_DATABASE_URL` | Operator-only database credential for staged maintenance rollout; never a Worker binding, never log or commit |
 | `TEST_DATABASE_URL` | Fresh disposable PostgreSQL connection string for `test:postgres`; local-only, never a Worker binding; do not log or commit |
 | `TEST_AUTH_URL` | Loopback-only disposable GoTrue origin for `test:auth-live`; defaults to port 55433 |
 | `TEST_AUTH_JWT_SECRET` | Synthetic local Auth-container JWT signing secret for `test:auth-live`; never a production binding |

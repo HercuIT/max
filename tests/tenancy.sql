@@ -40,7 +40,7 @@ select set_config('request.jwt.claim.sub','10000000-0000-4000-8000-000000000002'
 select public.manage_tenant(current_setting('test.b')::uuid,'keys.create',null,jsonb_build_object('label','B exporter','token_hash',repeat('b',64),'prefix','brk_b'));
 reset role;
 set local role service_role;
-select public.ingest_telemetry(repeat('a',64),'[{"source":"claude","project_name":"shared","session_id":"same","input_tokens":10,"total_cost_usd":1},{"source":"codex","project_name":"shared","session_id":"same","input_tokens":20,"total_cost_usd":2}]');
+select public.ingest_telemetry(repeat('a',64),'[{"source":"claude","project_name":"shared","session_id":"same","input_tokens":10,"total_cost_usd":1},{"source":"codex","project_name":"shared","session_id":"same","input_tokens":20,"total_cost_usd":2},{"source":"codex","project_name":"codex-only","session_id":"codex-only","input_tokens":0,"total_cost_usd":0}]');
 select public.ingest_telemetry(repeat('b',64),'[{"source":"codex","project_name":"shared","session_id":"same","input_tokens":999,"total_cost_usd":99}]');
 select pg_temp.denied($q$select public.ingest_telemetry(repeat('a',64),'[{"source":"codex","project_name":"bad","tenant_id":"10000000-0000-4000-8000-000000000002","total_cost_usd":1}]')$q$,'22023');
 select pg_temp.denied($q$select public.ingest_telemetry(repeat('f',64),'[]')$q$,'PT401');
@@ -62,7 +62,7 @@ select pg_temp.check_true((select sum(total_cost_usd)=3 from public.get_cost_tab
 select pg_temp.check_true((select sessions=2 and total_tokens=30 from public.get_token_usage_table(current_setting('test.a')::uuid,p_projects=>array['shared'])),'source-aware session counts');
 select pg_temp.check_true((select sum(input_tokens)=20 from public.get_token_usage_series(current_setting('test.a')::uuid,p_source=>'codex')),'source filter within tenant');
 select pg_temp.check_true((select sum(cost_usd)=2 from public.get_cost_series(current_setting('test.a')::uuid,p_source=>'codex')),'cost series within tenant');
-select pg_temp.check_true((select count(*)=1 from public.get_token_usage_projects(current_setting('test.a')::uuid,'codex')),'project list within tenant');
+select pg_temp.check_true((select count(*)=2 from public.get_token_usage_projects(current_setting('test.a')::uuid,'codex')),'project list within tenant');
 select pg_temp.check_true((select count(*)=0 from public.get_cost_table(current_setting('test.a')::uuid,p_projects=>array['unknown'])),'unknown project does not broaden filter');
 -- SOURCE_FILTER_ASSERTIONS
 select pg_temp.denied($q$select public.manage_tenant(current_setting('test.b')::uuid,'rename',null,'{"name":"hijacked"}')$q$,'PT404');
@@ -125,5 +125,5 @@ select public.purge_tenant(current_setting('test.b')::uuid);
 select public.purge_tenant(current_setting('test.b')::uuid);
 reset role;
 select pg_temp.check_true(exists(select 1 from auth.users where id='10000000-0000-4000-8000-000000000005'),'purge preserves shared Auth users');
-select pg_temp.check_true((select count(*)=3 from public.token_usage_logs where tenant_id=current_setting('test.a')::uuid),'purge preserves other tenant telemetry');
+select pg_temp.check_true((select count(*)=4 from public.token_usage_logs where tenant_id=current_setting('test.a')::uuid),'purge preserves other tenant telemetry');
 rollback;
