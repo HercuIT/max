@@ -1,6 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { tokenUsageDashboardHtml } from './dashboard';
 import { faviconAssets } from './assets';
+import { logError } from './logger';
 
 export interface Env {
     SUPABASE_URL: string;
@@ -157,11 +158,15 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
 
         if (recordsToInsert.length > 0) {
             const { error: insertError } = await supabase.from('token_usage_logs').insert(recordsToInsert);
-            if (insertError) return jsonResponse({ error: insertError.message }, 500);
+            if (insertError) {
+                logError('handleIngest.insert', insertError);
+                return jsonResponse({ error: insertError.message }, 500);
+            }
         }
 
         return jsonResponse({ success: true, count: recordsToInsert.length });
     } catch (err: any) {
+        logError('handleIngest', err);
         return jsonResponse({ error: err.message }, 500);
     }
 }
@@ -177,7 +182,10 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
 
     if (url.pathname === '/api/token-usage/projects') {
         const { data, error } = await supabase.rpc('get_token_usage_projects');
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) {
+            logError('handleTokenUsageApi.projects', error);
+            return jsonResponse({ error: error.message }, 500);
+        }
         return jsonResponse({ projects: (data ?? []).map((row: any) => row.project_name) });
     }
 
@@ -188,7 +196,10 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
             p_end: end,
             p_bucket: parseBucketParam(url),
         });
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) {
+            logError('handleTokenUsageApi.series', error);
+            return jsonResponse({ error: error.message }, 500);
+        }
         return jsonResponse({ series: data ?? [] });
     }
 
@@ -198,7 +209,10 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
             p_start: start,
             p_end: end,
         });
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) {
+            logError('handleTokenUsageApi.table', error);
+            return jsonResponse({ error: error.message }, 500);
+        }
         return jsonResponse({ rows: data ?? [] });
     }
 
@@ -220,7 +234,10 @@ export async function handleCostApi(request: Request, env: Env, url: URL): Promi
             p_start: start,
             p_end: end,
         });
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) {
+            logError('handleCostApi.table', error);
+            return jsonResponse({ error: error.message }, 500);
+        }
         return jsonResponse({ rows: data ?? [] });
     }
 
@@ -231,7 +248,10 @@ export async function handleCostApi(request: Request, env: Env, url: URL): Promi
             p_end: end,
             p_bucket: parseBucketParam(url),
         });
-        if (error) return jsonResponse({ error: error.message }, 500);
+        if (error) {
+            logError('handleCostApi.series', error);
+            return jsonResponse({ error: error.message }, 500);
+        }
         return jsonResponse({ series: data ?? [] });
     }
 
