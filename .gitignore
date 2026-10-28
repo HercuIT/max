@@ -2,5 +2,8 @@ node_modules
 .idea
 .claude/settings.json
 specs/*
+!specs/multi-tenant-support.md
+!specs/supabase-tenancy.md
+!specs/multi-tenant-rollout.md
 .env.local
 coverage/

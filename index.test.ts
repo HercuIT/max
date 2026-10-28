@@ -19,6 +19,7 @@ import worker, {
     isDashboardAuthorized,
     jsonResponse,
     parseBucketParam,
+    parseCodexLogs,
     parseProjectsParam,
     unauthorizedResponse,
     type Env,
@@ -330,6 +331,7 @@ describe('handleIngest', () => {
         const records = insert.mock.calls[0][0];
         expect(records).toHaveLength(5);
         expect(records[0]).toEqual({
+            source: 'claude',
             project_name: 'repo-a',
             session_id: 'sess-1',
             model: 'claude-3-5-sonnet',
@@ -878,5 +880,114 @@ describe('default export fetch routing', () => {
         const req = new Request('https://x/nope');
         const res = await worker.fetch(req, testEnv);
         expect(res.status).toBe(404);
+    });
+});
+
+
+describe('Codex OTLP logs and dashboard sources', () => {
+    const attrs = (values: Record<string, string | number>) => Object.entries(values).map(([key, value]) => ({
+        key, value: typeof value === 'string' ? { stringValue: value } : { intValue: String(value) },
+    }));
+    const usage = { 'event.name': 'codex.sse_event', 'event.kind': 'response.completed',
+        input_token_count: '100', output_token_count: '25', cached_token_count: 40,
+        cache_write_token_count: 10, reasoning_token_count: 15, 'conversation.id': 'conversation-1', model: 'gpt-5-codex' };
+    async function send(events: Record<string, string | number>[], query = '') {
+        return worker.fetch(new Request('https://x/v1/logs' + query, {
+            method: 'POST', headers: { Authorization: 'Bearer test-ingest-token', 'Content-Type': 'application/json' },
+            body: JSON.stringify({ resourceLogs: [{ resource: { attributes: attrs({ 'project.name': 'repo', 'host.name': 'host' }) },
+                scopeLogs: [{ logRecords: events.map((event) => ({ attributes: attrs(event) })) }] }] }),
+        }), testEnv);
+    }
+    it('stores disjoint tokens and reported cost without adding reasoning tokens twice', async () => {
+        expect((await send([usage, { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '0.125',
+            'conversation.id': 'conversation-1', model: 'gpt-5-codex' }])).status).toBe(200);
+        expect(insert.mock.calls[0][0]).toEqual([
+            { source: 'codex', project_name: 'repo', session_id: 'conversation-1', model: 'gpt-5-codex',
+                input_tokens: 50, output_tokens: 25, cache_read_tokens: 40, cache_write_tokens: 10,
+                total_cost_usd: 0, host_name: 'host', user_email: null },
+            expect.objectContaining({ source: 'codex', input_tokens: 0, output_tokens: 0, total_cost_usd: 0.125 }),
+        ]);
+    });
+    it('allows an explicit exporter project name', async () => {
+        await send([usage], '?project=other-repo');
+        expect(insert.mock.calls[0][0][0].project_name).toBe('other-repo');
+    });
+    it('ignores non-usage, failed, and generic completion events', async () => {
+        await send([{ 'event.name': 'codex.user_prompt' }, { 'event.name': 'codex.sse_event', 'event.kind': 'response.completed' },
+            { ...usage, 'error.message': 'stream failed' }, { 'event.name': 'codex.turn_cost' }]);
+        expect(insert).not.toHaveBeenCalled();
+    });
+    it.each([-1, 'NaN', '1.5', '9007199254740992', '', '  ', '\t\n'])('counts invalid tokens %s without inserting', async (value) => {
+        const response = await send([{ ...usage, input_token_count: value }]);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '1' } });
+        expect(insert).not.toHaveBeenCalled();
+    });
+    it('rejects cached counts exceeding input and invalid estimated costs', async () => {
+        const invalidEvents: Record<string, string | number>[] = [{ ...usage, cached_token_count: 101 },
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '-1' }];
+        for (const event of invalidEvents) {
+            const response = await send([event]);
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '1' } });
+        }
+        expect(insert).not.toHaveBeenCalled();
+    });
+    it.each(['', ' ', '\t\n'])('rejects blank cost %j while inserting valid siblings', async (cost) => {
+        const response = await send([
+            { ...usage, input_token_count: '' },
+            usage,
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': cost },
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '0.25' },
+        ]);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } });
+        expect(insert.mock.calls[0][0]).toEqual([
+            expect.objectContaining({ input_tokens: 50, output_tokens: 25 }),
+            expect.objectContaining({ total_cost_usd: 0.25 }),
+        ]);
+    });
+    it('reports Codex database failures', async () => {
+        insert.mockResolvedValueOnce({ error: { message: 'insert failed' } });
+        const response = await send([usage]);
+        expect(response.status).toBe(500);
+        expect(await response.json()).toEqual({ error: 'insert failed' });
+    });
+    it('handles missing token fields and metadata', async () => {
+        await send([{ 'event.name': 'codex.sse_event', 'event.kind': 'response.completed', output_token_count: 2 }]);
+        expect(insert.mock.calls[0][0][0]).toMatchObject({ input_tokens: 0, output_tokens: 2,
+            session_id: 'unknown_session', model: 'unknown_model' });
+    });
+    for (const endpoint of ['token-usage/projects', 'token-usage/series', 'token-usage/table', 'cost/series', 'cost/table']) {
+        it.each(['claude', 'codex'])('filters ' + endpoint + ' by %s', async (source) => {
+            const response = await worker.fetch(new Request('https://x/api/' + endpoint + '?source=' + source,
+                { headers: { Authorization: basicAuthHeader('test-user', 'test-pass') } }), testEnv);
+            expect(response.status).toBe(200);
+            expect(rpc).toHaveBeenCalledWith('get_' + endpoint.replaceAll('-', '_').replace('/', '_'),
+                expect.objectContaining({ p_source: source }));
+        });
+        it('rejects invalid source for ' + endpoint, async () => {
+            const response = await worker.fetch(new Request('https://x/api/' + endpoint + '?source=unknown',
+                { headers: { Authorization: basicAuthHeader('test-user', 'test-pass') } }), testEnv);
+            expect(response.status).toBe(400);
+            expect(rpc).not.toHaveBeenCalled();
+        });
+    }
+});
+
+
+describe('Codex OTLP value and metadata variants', () => {
+    it('accepts eventName and double values, falls back to the source project name', () => {
+        const records = parseCodexLogs({ resourceLogs: [{ scopeLogs: [{ logRecords: [{
+            eventName: 'codex.turn_cost', attributes: [
+                { key: 'usage.estimated_usd', value: { doubleValue: 0.5 } },
+                { key: 'user.email', value: { stringValue: 'developer@example.test' } },
+            ],
+        }] }] }] }, null);
+        expect(records.records).toEqual([expect.objectContaining({ source: 'codex', project_name: 'codex',
+            total_cost_usd: 0.5, host_name: null, user_email: 'developer@example.test' })]);
+    });
+    it('ignores resource and scope blocks with no logs', () => {
+        expect(parseCodexLogs({ resourceLogs: [{}, { scopeLogs: [{}] }] }, null)).toEqual({ records: [], rejectedLogRecords: 0 });
     });
 });

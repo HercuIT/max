@@ -81,6 +81,75 @@ export function handleFaviconAsset(pathname: string): Response | null {
     });
 }
 
+// Codex emits per-response usage as logs, not Claude-style token metrics.
+// Read OTLP AnyValue strings and numbers (Rust tracing uses both).
+function logAttribute(attributes: any[] | undefined, key: string): any {
+    const value = attributes?.find((attribute) => attribute.key === key)?.value;
+    return value?.stringValue ?? value?.intValue ?? value?.doubleValue;
+}
+
+function telemetryNumber(value: any): number {
+    if ((typeof value !== 'string' && typeof value !== 'number') ||
+        (typeof value === 'string' && value.trim() === '')) {
+        throw new RangeError('Codex numeric attributes must contain a number.');
+    }
+    return Number(value);
+}
+
+function tokenCount(value: any): number {
+    const count = value === undefined ? 0 : telemetryNumber(value);
+    if (!Number.isSafeInteger(count) || count < 0) {
+        throw new RangeError('Codex token counts must be non-negative safe integers.');
+    }
+    return count;
+}
+
+export function parseCodexLogs(payload: any, project: string | null) {
+    const records = [];
+    let rejectedLogRecords = 0;
+    for (const resource of payload.resourceLogs ?? []) {
+        for (const scope of resource.scopeLogs ?? []) {
+            for (const log of scope.logRecords ?? []) {
+                try {
+                    const attr = (key: string) => logAttribute(log.attributes, key) ??
+                        logAttribute(resource.resource?.attributes, key);
+                    const event = attr('event.name') ?? log.eventName;
+                    const completion = event === 'codex.sse_event' && attr('event.kind') === 'response.completed';
+                    const cost = event === 'codex.turn_cost';
+                    if ((!completion && !cost) || attr('error.message') !== undefined) continue;
+                    // Generic response.completed notices also exist; only the usage-bearing event counts.
+                    if (completion && attr('input_token_count') === undefined && attr('output_token_count') === undefined) continue;
+                    if (cost && attr('usage.estimated_usd') === undefined) continue;
+                    const input = completion ? tokenCount(attr('input_token_count')) : 0;
+                    const cached = completion ? tokenCount(attr('cached_token_count')) : 0;
+                    const cacheWrite = completion ? tokenCount(attr('cache_write_token_count')) : 0;
+                    if (cached + cacheWrite > input) throw new RangeError('Codex cached tokens exceed input tokens.');
+                    const usd = cost ? telemetryNumber(attr('usage.estimated_usd')) : 0;
+                    if (!Number.isFinite(usd) || usd < 0) throw new RangeError('Codex estimated cost must be a non-negative number.');
+                    records.push({
+                        source: 'codex',
+                        project_name: project || attr('vcs.repository.name') || attr('project.name') || 'codex',
+                        session_id: attr('conversation.id') || 'unknown_session',
+                        model: attr('model') || 'unknown_model',
+                        // Codex input includes cached tokens; store disjoint categories like Claude.
+                        input_tokens: input - cached - cacheWrite,
+                        output_tokens: completion ? tokenCount(attr('output_token_count')) : 0,
+                        cache_read_tokens: cached,
+                        cache_write_tokens: cacheWrite,
+                        total_cost_usd: usd,
+                        host_name: attr('host.name') ?? null,
+                        user_email: attr('user.email') ?? null,
+                    });
+                } catch (error) {
+                    if (!(error instanceof RangeError || error instanceof TypeError)) throw error;
+                    rejectedLogRecords++;
+                }
+            }
+        }
+    }
+    return { records, rejectedLogRecords };
+}
+
 export async function handleIngest(request: Request, env: Env, url: URL): Promise<Response> {
     if (request.method !== 'POST') {
         return jsonResponse({ error: 'Method Not Allowed' }, 405);
@@ -95,7 +164,24 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
         const payload: any = await request.json();
 
         if (url.pathname === '/v1/logs') {
-            return jsonResponse({ message: 'Logs acknowledged' });
+            const { records, rejectedLogRecords } = parseCodexLogs(payload, url.searchParams.get('project'));
+            if (records.length) {
+                const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+                    auth: { persistSession: false },
+                });
+                const { error } = await supabase.from('token_usage_logs').insert(records);
+                if (error) {
+                    logError('handleIngest.codex.insert', error);
+                    return jsonResponse({ error: error.message }, 500);
+                }
+            }
+            return jsonResponse({
+                message: 'Logs acknowledged',
+                ...(rejectedLogRecords ? { partialSuccess: {
+                    rejectedLogRecords: String(rejectedLogRecords),
+                    errorMessage: 'Invalid Codex usage records were skipped; check numeric attributes and cached token counts.',
+                } } : {}),
+            });
         }
 
         const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
@@ -125,6 +211,7 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
                         // data point and the resource block until that's verified against a
                         // real payload.
                         const record = {
+                            source: 'claude',
                             project_name: projectName,
                             session_id: findAttr(dp.attributes, 'session.id') || 'active_session',
                             model: 'claude-3-5-sonnet',
@@ -167,7 +254,7 @@ export async function handleIngest(request: Request, env: Env, url: URL): Promis
         return jsonResponse({ success: true, count: recordsToInsert.length });
     } catch (err: any) {
         logError('handleIngest', err);
-        return jsonResponse({ error: err.message }, 500);
+        return jsonResponse({ error: err.message }, err instanceof RangeError ? 400 : 500);
     }
 }
 
@@ -176,12 +263,17 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
         auth: { persistSession: false },
     });
 
+    const source = url.searchParams.get('source');
+    if (source && source !== 'claude' && source !== 'codex') {
+        return jsonResponse({ error: 'Invalid source: choose claude or codex, or omit source for all.' }, 400);
+    }
+    const sourceArgs = source ? { p_source: source } : {};
     const projects = parseProjectsParam(url);
     const start = url.searchParams.get('start') ?? undefined;
     const end = url.searchParams.get('end') ?? undefined;
 
     if (url.pathname === '/api/token-usage/projects') {
-        const { data, error } = await supabase.rpc('get_token_usage_projects');
+        const { data, error } = await supabase.rpc('get_token_usage_projects', sourceArgs);
         if (error) {
             logError('handleTokenUsageApi.projects', error);
             return jsonResponse({ error: error.message }, 500);
@@ -191,6 +283,7 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
 
     if (url.pathname === '/api/token-usage/series') {
         const { data, error } = await supabase.rpc('get_token_usage_series', {
+            ...sourceArgs,
             p_projects: projects,
             p_start: start,
             p_end: end,
@@ -205,6 +298,7 @@ export async function handleTokenUsageApi(request: Request, env: Env, url: URL):
 
     if (url.pathname === '/api/token-usage/table') {
         const { data, error } = await supabase.rpc('get_token_usage_table', {
+            ...sourceArgs,
             p_projects: projects,
             p_start: start,
             p_end: end,
@@ -224,12 +318,18 @@ export async function handleCostApi(request: Request, env: Env, url: URL): Promi
         auth: { persistSession: false },
     });
 
+    const source = url.searchParams.get('source');
+    if (source && source !== 'claude' && source !== 'codex') {
+        return jsonResponse({ error: 'Invalid source: choose claude or codex, or omit source for all.' }, 400);
+    }
+    const sourceArgs = source ? { p_source: source } : {};
     const projects = parseProjectsParam(url);
     const start = url.searchParams.get('start') ?? undefined;
     const end = url.searchParams.get('end') ?? undefined;
 
     if (url.pathname === '/api/cost/table') {
         const { data, error } = await supabase.rpc('get_cost_table', {
+            ...sourceArgs,
             p_projects: projects,
             p_start: start,
             p_end: end,
@@ -243,6 +343,7 @@ export async function handleCostApi(request: Request, env: Env, url: URL): Promi
 
     if (url.pathname === '/api/cost/series') {
         const { data, error } = await supabase.rpc('get_cost_series', {
+            ...sourceArgs,
             p_projects: projects,
             p_start: start,
             p_end: end,

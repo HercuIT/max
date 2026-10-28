@@ -139,10 +139,20 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     <button class="tab" data-tab="cost">Cost (USD)</button>
   </div>
 
+  <p class="hint">Codex costs are reported estimates when available; older Codex versions may report tokens without costs.</p>
   <div class="filters">
+    <div class="field">
+      <label for="source">Telemetry source</label>
+      <select id="source">
+        <option value="">All sources</option>
+        <option value="claude">Claude</option>
+        <option value="codex">Codex</option>
+      </select>
+    </div>
     <div class="field">
       <label for="projects">Projects (empty = all)</label>
       <select id="projects" multiple></select>
+      <button id="clearProjects" type="button">All projects</button>
     </div>
     <div class="field">
       <label for="start">Start</label>
@@ -242,7 +252,10 @@ export const tokenUsageDashboardHtml = `<!doctype html>
 
 <script>
 (function () {
+  const sourceSelect = document.getElementById('source');
+  const sourceByTab = { tokens: '', cost: '' };
   const projectsSelect = document.getElementById('projects');
+  const selectedProjectNames = new Set();
   const startInput = document.getElementById('start');
   const endInput = document.getElementById('end');
   const bucketSelect = document.getElementById('bucket');
@@ -269,6 +282,7 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   ];
 
   let activeTab = 'tokens';
+  let requestVersion = 0;
   const rangeByTab = { tokens: null, cost: null };
   let costChart = null;
   let costChartMode = 'bar';
@@ -308,12 +322,25 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     endInput.value = toLocalInputValue(end);
   }
 
+  function rememberProjectSelection() {
+    selectedProjectNames.clear();
+    for (const option of projectsSelect.selectedOptions) selectedProjectNames.add(option.value);
+  }
+
+  projectsSelect.addEventListener('change', rememberProjectSelection);
+  document.getElementById('clearProjects').addEventListener('click', () => {
+    selectedProjectNames.clear();
+    for (const option of projectsSelect.options) option.selected = false;
+    refreshProjectsAndLoad();
+  });
+
   function selectedProjects() {
-    return Array.from(projectsSelect.selectedOptions).map((o) => o.value);
+    return Array.from(selectedProjectNames);
   }
 
   function buildQuery(extra) {
     const params = new URLSearchParams();
+    if (sourceSelect.value) params.set('source', sourceSelect.value);
     const projects = selectedProjects();
     if (projects.length > 0) params.set('projects', projects.join(','));
     if (startInput.value) params.set('start', new Date(startInput.value).toISOString());
@@ -331,13 +358,20 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     return res.json();
   }
 
-  async function loadProjects() {
-    const { projects } = await fetchJson('/api/token-usage/projects');
+  async function loadProjects(version) {
+    const { projects } = await fetchJson('/api/token-usage/projects?' + new URLSearchParams({ source: sourceSelect.value }));
+    if (version !== requestVersion) return;
+    // Read after the request: users can edit the current list while it loads.
+    rememberProjectSelection();
+    const available = new Set(projects);
     projectsSelect.innerHTML = '';
-    for (const name of projects) {
+    // Keep selected names visible even when this source has no data for them.
+    // Removing them would turn an empty intersection into an all-project query.
+    for (const name of new Set([...projects, ...selectedProjectNames])) {
       const opt = document.createElement('option');
       opt.value = name;
-      opt.textContent = name;
+      opt.textContent = available.has(name) ? name : name + ' (no data for selected source)';
+      opt.selected = selectedProjectNames.has(name);
       projectsSelect.appendChild(opt);
     }
   }
@@ -549,8 +583,10 @@ export const tokenUsageDashboardHtml = `<!doctype html>
 
   function switchTab(tab) {
     if (tab === activeTab) return;
+    sourceByTab[activeTab] = sourceSelect.value;
     rangeByTab[activeTab] = { start: startInput.value, end: endInput.value };
     activeTab = tab;
+    sourceSelect.value = sourceByTab[tab];
     if (rangeByTab[tab]) {
       startInput.value = rangeByTab[tab].start;
       endInput.value = rangeByTab[tab].end;
@@ -563,14 +599,14 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     document.querySelectorAll('.tab').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     document.getElementById('pane-tokens').classList.toggle('active', tab === 'tokens');
     document.getElementById('pane-cost').classList.toggle('active', tab === 'cost');
-    load();
+    refreshProjectsAndLoad();
   }
 
   document.querySelectorAll('.tab').forEach((b) => {
     b.addEventListener('click', () => switchTab(b.dataset.tab));
   });
 
-  async function load() {
+  async function load(version) {
     statusEl.textContent = 'Loading...';
     try {
       const bucket = bucketSelect.value;
@@ -579,6 +615,7 @@ export const tokenUsageDashboardHtml = `<!doctype html>
           fetchJson('/api/token-usage/series?' + buildQuery({ bucket })),
           fetchJson('/api/token-usage/table?' + buildQuery()),
         ]);
+        if (version !== requestVersion) return;
         renderChart(seriesRes.series);
         tableRows = tableRes.rows;
         renderTable();
@@ -587,6 +624,7 @@ export const tokenUsageDashboardHtml = `<!doctype html>
           fetchJson('/api/cost/table?' + buildQuery()),
           fetchJson('/api/cost/series?' + buildQuery({ bucket })),
         ]);
+        if (version !== requestVersion) return;
         costRows = tableRes.rows;
         costSeries = seriesRes.series;
         renderCostChart();
@@ -594,14 +632,28 @@ export const tokenUsageDashboardHtml = `<!doctype html>
       }
       statusEl.textContent = '';
     } catch (err) {
-      statusEl.textContent = 'Error: ' + err.message;
+      if (version === requestVersion) statusEl.textContent = 'Error: ' + err.message;
     }
   }
 
-  applyButton.addEventListener('click', load);
+  async function refreshProjectsAndLoad() {
+    const version = ++requestVersion;
+    try {
+      await loadProjects(version);
+      if (version !== requestVersion) return;
+      await load(version);
+    } catch (err) {
+      if (version === requestVersion) statusEl.textContent = 'Could not load projects: ' + err.message + '. Try Apply again.';
+    }
+  }
+  sourceSelect.addEventListener('change', () => {
+    sourceByTab[activeTab] = sourceSelect.value;
+    refreshProjectsAndLoad();
+  });
+  applyButton.addEventListener('click', refreshProjectsAndLoad);
 
   setDefaultRange();
-  loadProjects().finally(load);
+  refreshProjectsAndLoad();
 })();
 </script>
 </body>
