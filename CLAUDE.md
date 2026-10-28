@@ -40,6 +40,14 @@ Guidance for Claude Code when working in this repository.
 - The `get_token_usage_*` and `get_cost_*` Postgres functions have `EXECUTE` revoked from `anon`/`authenticated` and granted only to `service_role` (see the migrations). This data isn't scoped by RLS/ownership, so if `anon`/`authenticated` could call them, anyone with the public anon key could read every project's usage. Keep that revoke/grant pattern for any new dashboard RPC.
 - `get_cost_table`/`get_cost_series` intentionally default `p_start`/`p_end` to `NULL` (meaning "no filter" / all-time), unlike `get_token_usage_series`/`get_token_usage_table`, which default to `now() - interval '7 days'`. This is deliberate — `specs/usd-per-project-dashboard.md` wants the Cost (USD) tab to default to all-time — not an inconsistency to "fix" by matching the other two.
 
+## Codex ingestion and source filtering
+
+`/v1/logs` also persists usage-bearing Codex `codex.sse_event` / `response.completed` events and reported `codex.turn_cost` estimates. Other logs are still acknowledged without persistence. `source` is explicit (`claude` / `codex`); historical rows default to Claude. Codex input includes cached tokens, so store disjoint categories; reasoning tokens are already part of output. Model comes from Codex metadata, while the existing Claude model simplification remains unchanged.
+
+All five dashboard RPCs accept optional `p_source`; validate the HTTP `source` parameter. Each dashboard tab remembers its source selection and filters its project list, chart, and table. Preserve the service-role-only grants and the different token/cost default date ranges. Apply the source migration before Worker deployment. Codex exports logs as OTLP/HTTP JSON configured under `[otel]` in user `~/.codex/config.toml`; see README.md for the exporter example and optional `project` query attribution. No new Worker secrets are required. Reported Codex costs are estimates and may be unavailable on older versions.
+
+Optional database integration tests use local `TEST_DATABASE_URL` only (`psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/source-filter.sql`); it is a connection string for a disposable migrated test database, never a Worker binding. Do not print it or commit it.
+
 ## Secrets and variables reference
 
 Everything below is the full inventory — if you add a new secret or env var anywhere in this repo (Worker, migrations CI, Worker deploy CI, or the client-side telemetry setup this Worker ingests from), add it here too.

@@ -1,6 +1,6 @@
 # HercuIT Burnrate
 
-A Cloudflare Worker (`claude-code-telemetry-ingest`) that receives Claude Code's OpenTelemetry (OTLP) metrics/logs export and writes token usage and cost data into Supabase. This repo's directory is still named `max`.
+A Cloudflare Worker (`claude-code-telemetry-ingest`) that receives Claude Code and Codex OpenTelemetry (OTLP) metrics/logs export and writes token usage and cost data into Supabase. This repo's directory is still named `max`.
 
 ## What it does
 
@@ -9,7 +9,7 @@ Claude Code can export usage telemetry (tokens, cost, sessions) via OTLP. This w
 ## Endpoint
 
 - `POST /v1/metrics` — accepts an OTLP metrics payload and inserts rows into `token_usage_logs`. Matches on the exact metric name (`claude_code.token.usage`, `claude_code.cost.usage`); for token usage, reads the `type` attribute (`input`/`output`/`cacheRead`/`cacheCreation`) off each data point rather than off the metric name, since Claude Code doesn't send a separate metric name per token type. Every inserted row currently hardcodes `model` to `'claude-3-5-sonnet'` regardless of the model actually used — a known simplification, not yet wired up to real model data.
-- `POST /v1/logs` — accepts an OTLP logs payload and acknowledges it (not persisted).
+- `POST /v1/logs` — accepts OTLP/HTTP JSON logs. Persists Codex `codex.sse_event` / `response.completed` token usage and `codex.turn_cost` estimates; other logs are acknowledged without persistence. See [Codex setup](#codex-telemetry).
 
 Both endpoints require:
 ```
@@ -26,6 +26,8 @@ Requests that aren't `POST`, aren't JSON, or don't match a known path return `40
 - `GET /favicon.ico`, `/favicon.svg`, `/favicon-{16,32,192,512}.png`, `/apple-touch-icon.png` — static brand assets (see `specs/branding-theme.md`). Unauthenticated, like any site's favicon.
 
 See `specs/token-usage-dashboard.md` and `specs/usd-per-project-dashboard.md` for the full specs these implement.
+
+Both dashboard tabs offer **All sources / Claude / Codex**. Each tab remembers its source selection independently; it applies to the project list, chart, and table. Existing historical rows are classified as Claude. API endpoints accept optional `source=claude` or `source=codex`; omitting it combines both.
 
 ## Project layout
 
@@ -178,3 +180,26 @@ Or open `http://localhost:8787/dashboard/token-usage` in a browser and enter `DA
 - `DASHBOARD_USERNAME` / `DASHBOARD_PASSWORD` — the credentials to push. There is no default; both must be set before running the workflow.
 
 Run it from the Actions tab whenever you need to set or rotate the dashboard's Basic Auth credentials.
+
+
+## Codex telemetry
+
+Apply `supabase/migrations/20261028190000_add_codex_telemetry.sql` **before deploying the updated Worker**. It adds `source` (existing rows default to `claude`), updates all five dashboard RPCs with an optional source filter, and retains service-role-only access. Session counts distinguish Claude and Codex even when their session IDs coincide. Old callers without a source filter continue to combine both sources.
+
+Configure the Codex CLI's user `~/.codex/config.toml` to send **logs** using OTLP/HTTP **JSON** (binary protobuf and gRPC aren't supported by this Worker):
+
+```toml
+[otel]
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "https://<your-worker>.workers.dev/v1/logs?project=my-repo", protocol = "json", headers = { "Authorization" = "Bearer <INGEST_SECRET_TOKEN>" } } }
+```
+
+Replace the placeholders locally; keep the real token out of version control. This example is a literal configuration, not environment-variable interpolation. Use a URL-encoded `project` query value to associate a Codex exporter with a repository; the CLI doesn't reliably export a repository name on its usage logs. For multiple projects, launch Codex with the appropriate exporter configuration override for each project. Without the query parameter, ingestion uses `vcs.repository.name` or `project.name` when supplied by a collector, then `codex` as a fallback.
+
+The Worker reads `conversation.id`, `model`, `host.name`, and `user.email` when present. Completion events supply `input_token_count`, `output_token_count`, `cached_token_count`, and optional `cache_write_token_count`. Cached input is subtracted from input before storing the disjoint token categories, and reasoning tokens aren't added a second time to output. Generic completion notices and failed events are ignored. Negative, non-integer, unsafe, or inconsistent token counts return HTTP 400 without inserting the batch.
+
+Recent Codex versions also emit `codex.turn_cost` with `usage.estimated_usd`; this is a **reported estimate**, not an invoice. Versions without that event show token usage without cost amounts. We do not guess model prices or derive dollars from token counts. Other log event bodies (including prompts/tool outputs) aren't stored. Send logs only; also translating Codex usage into Claude-style metrics would double-count it.
+
+The integration follows the [official Codex telemetry implementation](https://github.com/openai/codex/blob/c92700d2993707ee16eb63b35a1cdd7fcc563f69/codex-rs/otel/src/events/session_telemetry.rs). Claude's existing `/v1/metrics` ingestion and authentication remain supported.
+
+For a disposable PostgreSQL database with migrations already applied, run the source-filter integration assertions with `psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/source-filter.sql`. This test rolls back its fixtures and checks all five RPCs, project/date intersections, cross-source session counts, and access restrictions. `TEST_DATABASE_URL` is an optional local test connection string, never a Worker secret; do not point it at production.
