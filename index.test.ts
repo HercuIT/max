@@ -917,14 +917,35 @@ describe('Codex OTLP logs and dashboard sources', () => {
             { ...usage, 'error.message': 'stream failed' }, { 'event.name': 'codex.turn_cost' }]);
         expect(insert).not.toHaveBeenCalled();
     });
-    it.each([-1, 'NaN', '1.5', '9007199254740992'])('rejects invalid tokens %s before inserting', async (value) => {
-        expect((await send([{ ...usage, input_token_count: value }])).status).toBe(400);
+    it.each([-1, 'NaN', '1.5', '9007199254740992', '', '  ', '\t\n'])('counts invalid tokens %s without inserting', async (value) => {
+        const response = await send([{ ...usage, input_token_count: value }]);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '1' } });
         expect(insert).not.toHaveBeenCalled();
     });
     it('rejects cached counts exceeding input and invalid estimated costs', async () => {
-        expect((await send([{ ...usage, cached_token_count: 101 }])).status).toBe(400);
-        expect((await send([{ 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '-1' }])).status).toBe(400);
+        const invalidEvents: Record<string, string | number>[] = [{ ...usage, cached_token_count: 101 },
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '-1' }];
+        for (const event of invalidEvents) {
+            const response = await send([event]);
+            expect(response.status).toBe(200);
+            expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '1' } });
+        }
         expect(insert).not.toHaveBeenCalled();
+    });
+    it.each(['', ' ', '\t\n'])('rejects blank cost %j while inserting valid siblings', async (cost) => {
+        const response = await send([
+            { ...usage, input_token_count: '' },
+            usage,
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': cost },
+            { 'event.name': 'codex.turn_cost', 'usage.estimated_usd': '0.25' },
+        ]);
+        expect(response.status).toBe(200);
+        expect(await response.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } });
+        expect(insert.mock.calls[0][0]).toEqual([
+            expect.objectContaining({ input_tokens: 50, output_tokens: 25 }),
+            expect.objectContaining({ total_cost_usd: 0.25 }),
+        ]);
     });
     it('reports Codex database failures', async () => {
         insert.mockResolvedValueOnce({ error: { message: 'insert failed' } });
@@ -963,10 +984,10 @@ describe('Codex OTLP value and metadata variants', () => {
                 { key: 'user.email', value: { stringValue: 'developer@example.test' } },
             ],
         }] }] }] }, null);
-        expect(records).toEqual([expect.objectContaining({ source: 'codex', project_name: 'codex',
+        expect(records.records).toEqual([expect.objectContaining({ source: 'codex', project_name: 'codex',
             total_cost_usd: 0.5, host_name: null, user_email: 'developer@example.test' })]);
     });
     it('ignores resource and scope blocks with no logs', () => {
-        expect(parseCodexLogs({ resourceLogs: [{}, { scopeLogs: [{}] }] }, null)).toEqual([]);
+        expect(parseCodexLogs({ resourceLogs: [{}, { scopeLogs: [{}] }] }, null)).toEqual({ records: [], rejectedLogRecords: 0 });
     });
 });

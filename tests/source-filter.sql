@@ -41,6 +41,12 @@ begin
     if exists (select 1 from public.get_cost_table(p_projects => projects, p_source => 'codex', p_start => now() + interval '1 day')) then
         raise exception 'date/source intersection failed';
     end if;
+    if has_table_privilege('anon', 'public.token_usage_logs', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       or has_table_privilege('authenticated', 'public.token_usage_logs', 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+       or not has_table_privilege('service_role', 'public.token_usage_logs', 'SELECT')
+       or not has_table_privilege('service_role', 'public.token_usage_logs', 'INSERT') then
+        raise exception 'raw telemetry table permissions regressed';
+    end if;
     if exists (
         select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
         where n.nspname = 'public' and p.proname in ('get_token_usage_projects', 'get_token_usage_series', 'get_token_usage_table', 'get_cost_table', 'get_cost_series')
@@ -49,4 +55,34 @@ begin
     ) then raise exception 'dashboard RPC permissions regressed'; end if;
 end;
 $$;
+-- Exercise actual API-role queries as well as inspecting grants.
+set local role anon;
+do $$
+begin
+    perform 1 from public.token_usage_logs limit 1;
+    raise exception 'anon unexpectedly read raw telemetry';
+exception when insufficient_privilege then null;
+end;
+$$;
+reset role;
+set local role authenticated;
+do $$
+begin
+    perform 1 from public.token_usage_logs limit 1;
+    raise exception 'authenticated unexpectedly read raw telemetry';
+exception when insufficient_privilege then null;
+end;
+$$;
+reset role;
+set local role service_role;
+insert into public.token_usage_logs (source, project_name, session_id, input_tokens)
+values ('codex', '__source_filter_service_role__', 'service-role-test', 1);
+do $$
+begin
+    if not exists (select 1 from public.get_token_usage_projects('codex') where project_name = '__source_filter_service_role__') then
+        raise exception 'service role cannot read ingested telemetry through dashboard RPC';
+    end if;
+end;
+$$;
+reset role;
 rollback;

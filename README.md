@@ -38,8 +38,8 @@ Both dashboard tabs offer **All sources / Claude / Codex**. Each tab remembers i
 - `index.test.ts` / `vitest.config.ts` — unit tests for `index.ts` (ingest parsing/auth, dashboard API routing) and their coverage config.
 - `assets.ts` — base64-encoded favicon files served at `/favicon.*`, `/favicon-*.png`, `/apple-touch-icon.png` (see `specs/branding-theme.md`).
 - `wrangler.toml` — Cloudflare Worker config (name: `claude-code-telemetry-ingest`).
-- `.github/workflows/deploy-migrations.yml` — pushes pending migrations in `supabase/migrations/` to the linked Supabase project whenever they change on `main`.
-- `.github/workflows/deploy-worker.yml` — runs `wrangler deploy` whenever `index.ts`, `dashboard.ts`, `wrangler.toml`, or the lockfile change on `main` (or on manual dispatch). This is what actually puts Worker code changes live — committing them alone does not deploy.
+- `.github/workflows/deploy-migrations.yml` — reusable migration job called by the Worker deployment workflow before each deployment.
+- `.github/workflows/deploy-worker.yml` — applies migrations and then runs `wrangler deploy` on Worker, manifest, migration, or deployment-workflow changes to `main` (or on manual dispatch). This is what actually puts Worker code changes live — committing them alone does not deploy.
 
 ## Setup
 
@@ -113,7 +113,7 @@ Also note: the metrics exporter flushes periodically, not instantly — the inte
 
 ## CI: migration deploys
 
-`.github/workflows/deploy-migrations.yml` runs `supabase db push` against the linked project whenever a push to `main` touches `supabase/migrations/**` (or is triggered manually). It requires these repo secrets:
+`.github/workflows/deploy-migrations.yml` is a reusable workflow that runs `supabase db push` against the linked project. The Worker deployment workflow calls it first on pushes to `main` that change Worker code, configuration, deployment workflows, or migrations, and on manual dispatch. It requires these repo secrets:
 
 - `SUPABASE_ACCESS_TOKEN` — a scoped personal access token (read access to Project Settings/API Keys is enough; needed for `supabase link`).
 - `SUPABASE_PROJECT_ID` — the target project's ref.
@@ -124,11 +124,11 @@ To add a new migration locally:
 npx supabase migration new <name>
 # edit the generated supabase/migrations/<timestamp>_<name>.sql
 ```
-Commit the generated file — CI applies whatever is new in `supabase/migrations/` on merge to `main`.
+Commit the generated file — CI applies pending migrations before deploying the Worker on merge to `main`. A migration failure blocks Worker deployment. Releases are serialized, so another deployment cannot race this migration/deployment sequence. For a manual release, dispatch **Deploy Worker**; it also runs migrations first.
 
 ## CI: deploying the Worker
 
-`.github/workflows/deploy-worker.yml` runs `wrangler deploy` on pushes to `main` that touch `index.ts`, `dashboard.ts`, `wrangler.toml`, or `package-lock.json` (or on manual dispatch). It requires:
+`.github/workflows/deploy-worker.yml` runs the migration workflow and then `wrangler deploy` on pushes to `main` that touch Worker files, package manifests, migrations, or either deployment workflow (or on manual dispatch). The Worker job uses `needs: migrations`, so it runs only after migrations succeed for the same checkout. It requires the three Supabase migration secrets above, plus:
 
 - `CLOUDFLARE_API_TOKEN` — a token with permission to deploy this Worker.
 - `CLOUDFLARE_ACCOUNT_ID` — your Cloudflare account ID.
@@ -196,10 +196,15 @@ exporter = { otlp-http = { endpoint = "https://<your-worker>.workers.dev/v1/logs
 
 Replace the placeholders locally; keep the real token out of version control. This example is a literal configuration, not environment-variable interpolation. Use a URL-encoded `project` query value to associate a Codex exporter with a repository; the CLI doesn't reliably export a repository name on its usage logs. For multiple projects, launch Codex with the appropriate exporter configuration override for each project. Without the query parameter, ingestion uses `vcs.repository.name` or `project.name` when supplied by a collector, then `codex` as a fallback.
 
-The Worker reads `conversation.id`, `model`, `host.name`, and `user.email` when present. Completion events supply `input_token_count`, `output_token_count`, `cached_token_count`, and optional `cache_write_token_count`. Cached input is subtracted from input before storing the disjoint token categories, and reasoning tokens aren't added a second time to output. Generic completion notices and failed events are ignored. Negative, non-integer, unsafe, or inconsistent token counts return HTTP 400 without inserting the batch.
+The Worker reads `conversation.id`, `model`, `host.name`, and `user.email` when present. Completion events supply `input_token_count`, `output_token_count`, `cached_token_count`, and optional `cache_write_token_count`. Both cached-read input (`cached_token_count`) and cache-write input (`cache_write_token_count`) are subtracted from total input before storing the disjoint token categories, and reasoning tokens aren't added a second time to output. Generic completion notices and failed events are ignored. Blank numeric strings and negative, non-integer, unsafe, or inconsistent token counts are rejected per record. Valid sibling records are still inserted; HTTP 200 includes OTLP `partialSuccess.rejectedLogRecords` and an error message when any records are rejected. A fully valid batch retains the normal acknowledgment.
 
 Recent Codex versions also emit `codex.turn_cost` with `usage.estimated_usd`; this is a **reported estimate**, not an invoice. Versions without that event show token usage without cost amounts. We do not guess model prices or derive dollars from token counts. Other log event bodies (including prompts/tool outputs) aren't stored. Send logs only; also translating Codex usage into Claude-style metrics would double-count it.
 
 The integration follows the [official Codex telemetry implementation](https://github.com/openai/codex/blob/c92700d2993707ee16eb63b35a1cdd7fcc563f69/codex-rs/otel/src/events/session_telemetry.rs). Claude's existing `/v1/metrics` ingestion and authentication remain supported.
 
 For a disposable PostgreSQL database with migrations already applied, run the source-filter integration assertions with `psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/source-filter.sql`. This test rolls back its fixtures and checks all five RPCs, project/date intersections, cross-source session counts, and access restrictions. `TEST_DATABASE_URL` is an optional local test connection string, never a Worker secret; do not point it at production.
+
+
+## Planned multi-tenant support
+
+Proposed specifications (not implemented): [product behavior and roles](specs/multi-tenant-support.md), [Supabase schema, Auth, RLS, and ingestion boundaries](specs/supabase-tenancy.md), and [migration, rollout, and acceptance tests](specs/multi-tenant-rollout.md).

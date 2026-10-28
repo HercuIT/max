@@ -14,8 +14,8 @@ Guidance for Claude Code when working in this repository.
 - `index.test.ts` / `vitest.config.ts` — the `index.ts` unit test suite and its coverage config (90% floor, Istanbul provider). See "Testing / running" below.
 - `assets.ts` — base64-encoded favicon files (generated from `specs/branding-theme.md`'s brand kit), served directly by `index.ts`'s `handleFaviconAsset` with no static-asset binding. Regenerate rather than hand-edit if the brand assets change.
 - `supabase/migrations/` — imperative migration history: `projects`, `token_usage_logs`, `project_spend_summary` view (access-controlled but unused by any code path), `get_token_usage_projects`/`get_token_usage_series`/`get_token_usage_table` (token-usage tab), and `get_cost_table`/`get_cost_series` (Cost (USD) tab). This is the source of truth for the DB shape; if `index.ts` inserts or queries a field, it should exist here. Don't hand-edit old migration files — add a new one with `supabase migration new <name>`.
-- `.github/workflows/deploy-migrations.yml` — CI job that runs `supabase link` + `supabase db push` on pushes to `main` that touch `supabase/migrations/**`. Needs `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_ID`, `SUPABASE_DB_PASSWORD` as repo secrets.
-- `.github/workflows/deploy-worker.yml` — CI job that runs `wrangler deploy` on pushes to `main` touching `index.ts`/`dashboard.ts`/`wrangler.toml`/the lockfile. Needs `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. **Editing `index.ts`/`dashboard.ts` and committing is not enough to change the live Worker** — this workflow (or a manual `wrangler deploy`) has to actually run.
+- `.github/workflows/deploy-migrations.yml` — reusable CI workflow that runs `supabase link` + `supabase db push`. The Worker deployment workflow calls it before deploying on Worker/migration changes to `main` or manual dispatch. Needs `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_ID`, `SUPABASE_DB_PASSWORD` as repo secrets.
+- `.github/workflows/deploy-worker.yml` — CI workflow that applies migrations and then runs `wrangler deploy` on pushes to `main` touching Worker files, manifests, migrations, or deployment workflows, or on manual dispatch. Needs the Supabase migration secrets plus `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Deploys wait for the migration job; one workflow serializes schema and Worker releases. **Editing `index.ts`/`dashboard.ts` and committing is not enough to change the live Worker** — this workflow (or a manual `wrangler deploy`) has to actually run.
 - `wrangler.toml` — Worker name/entry/compatibility date only. Secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `INGEST_SECRET_TOKEN`, `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`) are configured via `wrangler secret put`, not in this file.
 
 ## Working in this repo
@@ -79,6 +79,12 @@ Only `name`, `main`, `compatibility_date`, and the `[observability.*]` blocks �
 | `CLOUDFLARE_ACCOUNT_ID` | `deploy-worker.yml`, `set-dashboard-credentials.yml` | Target Cloudflare account. |
 | `DASHBOARD_USERNAME` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
 | `DASHBOARD_PASSWORD` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
+
+### Optional local integration-test variables
+
+| Name | Used by | Purpose |
+|---|---|---|
+| `TEST_DATABASE_URL` | `psql` running `tests/source-filter.sql` | Local-only connection string for a disposable migrated test database. Optional; never a Worker binding or production database. May contain credentials: never print or commit it. |
 
 ### Claude Code telemetry client env vars (set outside this repo, on the machines sending telemetry — not Worker config)
 

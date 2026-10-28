@@ -1,12 +1,14 @@
 name: Deploy Supabase Migrations
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "supabase/migrations/**"
-  workflow_dispatch:
+  workflow_call:
+    secrets:
+      SUPABASE_ACCESS_TOKEN:
+        required: true
+      SUPABASE_DB_PASSWORD:
+        required: true
+      SUPABASE_PROJECT_ID:
+        required: true
 
 jobs:
   deploy:

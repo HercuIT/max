@@ -152,6 +152,7 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     <div class="field">
       <label for="projects">Projects (empty = all)</label>
       <select id="projects" multiple></select>
+      <button id="clearProjects" type="button">All projects</button>
     </div>
     <div class="field">
       <label for="start">Start</label>
@@ -254,6 +255,7 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   const sourceSelect = document.getElementById('source');
   const sourceByTab = { tokens: '', cost: '' };
   const projectsSelect = document.getElementById('projects');
+  const selectedProjectNames = new Set();
   const startInput = document.getElementById('start');
   const endInput = document.getElementById('end');
   const bucketSelect = document.getElementById('bucket');
@@ -320,8 +322,20 @@ export const tokenUsageDashboardHtml = `<!doctype html>
     endInput.value = toLocalInputValue(end);
   }
 
+  function rememberProjectSelection() {
+    selectedProjectNames.clear();
+    for (const option of projectsSelect.selectedOptions) selectedProjectNames.add(option.value);
+  }
+
+  projectsSelect.addEventListener('change', rememberProjectSelection);
+  document.getElementById('clearProjects').addEventListener('click', () => {
+    selectedProjectNames.clear();
+    for (const option of projectsSelect.options) option.selected = false;
+    refreshProjectsAndLoad();
+  });
+
   function selectedProjects() {
-    return Array.from(projectsSelect.selectedOptions).map((o) => o.value);
+    return Array.from(selectedProjectNames);
   }
 
   function buildQuery(extra) {
@@ -345,15 +359,19 @@ export const tokenUsageDashboardHtml = `<!doctype html>
   }
 
   async function loadProjects(version) {
-    const selected = selectedProjects();
     const { projects } = await fetchJson('/api/token-usage/projects?' + new URLSearchParams({ source: sourceSelect.value }));
     if (version !== requestVersion) return;
+    // Read after the request: users can edit the current list while it loads.
+    rememberProjectSelection();
+    const available = new Set(projects);
     projectsSelect.innerHTML = '';
-    for (const name of projects) {
+    // Keep selected names visible even when this source has no data for them.
+    // Removing them would turn an empty intersection into an all-project query.
+    for (const name of new Set([...projects, ...selectedProjectNames])) {
       const opt = document.createElement('option');
       opt.value = name;
-      opt.textContent = name;
-      opt.selected = selected.includes(name);
+      opt.textContent = available.has(name) ? name : name + ' (no data for selected source)';
+      opt.selected = selectedProjectNames.has(name);
       projectsSelect.appendChild(opt);
     }
   }
