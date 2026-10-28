@@ -1,117 +1,86 @@
-# CLAUDE.md
+# Working on HercuIT Burnrate
 
-Guidance for Claude Code when working in this repository.
+This repository (`max`) serves a multi-tenant Claude/Codex telemetry dashboard through a Cloudflare Worker and Supabase. Read README.md, specs/multi-tenant-support.md, specs/supabase-tenancy.md, and docs/tenancy-operations.md before changing authorization or deployment.
 
-## What this is
+## Repository map
 
-**HercuIT Burnrate** (Worker name: `claude-code-telemetry-ingest`; this repo's directory is still named `max`) is a small Cloudflare Worker that ingests Claude Code's OTLP telemetry export (metrics + logs) and writes token usage/cost rows into Supabase. See `README.md` for the full description, endpoints, and setup/deploy steps.
+- `index.ts`: request routing, bounded ingestion, safe response/error handling.
+- `auth.ts`: Supabase email OTP, validated user sessions, Secure/HttpOnly cookies, refresh, CSRF, sign-out.
+- `tenancy.ts`: tenant-scoped dashboard/admin APIs, invitation delivery contract.
+- `http.ts`: shared validation, body limits, credential generation/hashing, database errors and distributed rate limiting.
+- `telemetry.ts`: pure Claude metric / Codex log normalization. Other log bodies are not persisted.
+- `dashboard.ts`, `pages.ts`: static HTML with plain browser JS inside template strings; no TypeScript/imports in the emitted scripts. Escape user-supplied text before inserting HTML.
+- `supabase/migrations/`: immutable applied history, tenant schema/RLS/RPCs, narrow service operations, role/key/invitation/deletion transactions.
+- `scripts/test-database.mjs`, `tests/tenancy.sql`, `tests/source-filter.sql`: PostgreSQL/RLS assertions including historical ownership and source filtering.
+- `scripts/test-dashboard.mjs`: execute real page scripts in a DOM.
+- `scripts/test-postgres.mjs`, `scripts/test-auth-live.mjs`: optional disposable local service integration tests.
 
-## Key files
+## Authorization rules
 
-- `index.ts` — the Worker: routes requests to `handleIngest` (`/v1/metrics`, `/v1/logs`) or the dashboard/API handlers (`/dashboard/token-usage`, `/api/token-usage/*`, `/api/cost/*`).
-- `dashboard.ts` — the token usage dashboard page as a single exported HTML string (`tokenUsageDashboardHtml`), served as-is by `index.ts`. Chart.js is loaded from cdnjs; there's no bundler step for this file, so keep it plain JS inside the template string (no TS syntax, no imports).
-- `specs/` — dashboard specs (e.g. `token-usage-dashboard.md`) written before implementation. Check here first before changing dashboard behavior — it's the intended design, not just a description of what exists.
-- `index.test.ts` / `vitest.config.ts` — the `index.ts` unit test suite and its coverage config (90% floor, Istanbul provider). See "Testing / running" below.
-- `assets.ts` — base64-encoded favicon files (generated from `specs/branding-theme.md`'s brand kit), served directly by `index.ts`'s `handleFaviconAsset` with no static-asset binding. Regenerate rather than hand-edit if the brand assets change.
-- `supabase/migrations/` — imperative migration history: `projects`, `token_usage_logs`, `project_spend_summary` view (access-controlled but unused by any code path), `get_token_usage_projects`/`get_token_usage_series`/`get_token_usage_table` (token-usage tab), and `get_cost_table`/`get_cost_series` (Cost (USD) tab). This is the source of truth for the DB shape; if `index.ts` inserts or queries a field, it should exist here. Don't hand-edit old migration files — add a new one with `supabase migration new <name>`.
-- `.github/workflows/deploy-migrations.yml` — reusable CI workflow that runs `supabase link` + `supabase db push`. The Worker deployment workflow calls it before deploying on Worker/migration changes to `main` or manual dispatch. Needs `SUPABASE_ACCESS_TOKEN`, `SUPABASE_PROJECT_ID`, `SUPABASE_DB_PASSWORD` as repo secrets.
-- `.github/workflows/deploy-worker.yml` — CI workflow that applies migrations and then runs `wrangler deploy` on pushes to `main` touching Worker files, manifests, migrations, or deployment workflows, or on manual dispatch. Needs the Supabase migration secrets plus `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`. Deploys wait for the migration job; one workflow serializes schema and Worker releases. **Editing `index.ts`/`dashboard.ts` and committing is not enough to change the live Worker** — this workflow (or a manual `wrangler deploy`) has to actually run.
-- `wrangler.toml` — Worker name/entry/compatibility date only. Secrets (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `INGEST_SECRET_TOKEN`, `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`) are configured via `wrangler secret put`, not in this file.
+1. Auth identifies a user; current database memberships authorize a tenant. Never derive tenant access from telemetry email/host/project, user-editable metadata, or a browser-selected tenant UUID.
+2. Human requests use a fresh user-scoped Supabase client with their validated JWT and publishable key. Never fall back to service role on denied/empty/failed reads. Every dashboard RPC requires a tenant ID and uses invoker RLS. No global aggregate routes or legacy overloads may be restored.
+3. Exporters use opaque tenant keys. Only the service-role ingestion RPC may resolve a hash to a tenant and create projects/usage. Payload tenant IDs/foreign project IDs are not authoritative. Empty batches still authenticate. Never expose hash or plaintext after the one-time key creation response.
+4. Membership mutations, key revocations, invitation acceptance and deletion serialize on tenant rows before child locks. Preserve last-owner checks, including Auth-user deletion. Removing membership takes effect immediately with a still-valid JWT.
+5. Private credential/invitation/audit tables are not exposed through PostgREST. Definer functions use fixed safe search paths, qualified relations, explicit grants, and current `auth.uid()`. Authenticated clients have read-only RLS access to safe public data and mutation rights only through checked RPCs.
+6. CSRF tokens plus exact Origin checking protect all cookie-authenticated mutations. No wildcard credentialed CORS. Never remove Secure/HttpOnly cookies to make a production request work. All tenant/session/key responses are no-store.
+7. Never print/log service keys, bearer/session/invitation tokens, hashes, raw OTLP bodies, prompts, or arbitrary provider errors. Log request IDs and safe failure categories. All exceptions reaching the user need specific actionable errors; catch failures in the responsible flow, not by silently swallowing them.
 
-## Working in this repo
+## Telemetry semantics
 
-- **Bug fixing protocol** — when fixing an error, don't just patch the first layer it surfaces in:
-  1. **Effect**: state the observed symptom precisely (error text, failing test, wrong behavior) as the fish's head.
-  2. **Bones/categories**: walk the likely cause categories for this codebase — e.g. data/DB (`supabase/migrations/` schema, RLS/grants, the `get_token_usage_*`/`get_cost_*` functions), server logic (`index.ts`'s route handlers), client/UI (`dashboard.ts`), ingest/telemetry sources (Claude Code's OTLP shape, and any future Codex/Gemini sources per `specs/`), auth (ingest bearer token vs. dashboard Basic Auth), CI/deploy (`.github/workflows/*.yml`) — and list candidate causes under each that could plausibly produce the symptom.
-  3. **Root cause**: from the candidate causes, identify the actual root cause (not just the proximate line that threw) — trace it back through the relevant modules/migrations.
-  4. **Blast radius**: using the same categories, enumerate every other place in the project this root cause could also affect (other metric names/data-point attributes parsed the same way, other dashboard tabs/API routes reading the same table or RPC function, other migrations with the same pattern, stale `specs/`/`CLAUDE.md` docs, missing test cases) — not just the layer where the symptom surfaced.
-  5. **Fix**: implement one fix that addresses the root cause and all the affected spots found in step 4, not just the originally reported symptom. Add/update tests per "Testing / running" below for every affected spot.
-- **Exception handling** — ensure all exceptions are clearly caught throughout the code, and that each catch clearly helps the developer debug the error (e.g. include the operation/context that failed, not just a generic message) rather than swallowing or obscuring it.
-- **UI errors must be specific and actionable.** Every exception that can reach a user-facing flow must be caught and surfaced to the user — never let one fail silently or only in the console. The message shown must tell the user what went wrong and what to do next (e.g. which field was invalid, that the slot was taken and to pick another, that the payment provider declined and to retry) rather than a generic fallback like "Something went wrong" or "No se pudo completar la acción" standing in for every failure mode. Map distinct error codes/validation fields from the API to distinct, specific copy in `lib/constants/strings.ts` instead of collapsing them into one catch-all string. `"No pudimos crear la cita."` (`UI_STRINGS.receptionist.createFailed`) is an example of a generic UI error message to avoid: when you hit a generic message like this one, add the reason to it and display that to the user, instead of leaving the user to guess why the action failed.
-- This is TypeScript targeting the Cloudflare Workers runtime (`@cloudflare/workers-types`), not Node — don't assume Node built-ins are available in `index.ts`. `tsconfig.json` uses `moduleResolution: bundler` (TS 7 removed the old `node` alias).
-- `handleIngest` in `index.ts` hardcodes `model: 'claude-3-5-sonnet'` on every inserted row regardless of the actual model in the payload — be aware of this when touching the metric-parsing loop or the dashboard's per-model breakdowns (currently out of scope for the same reason), it's a known simplification, not a typo to silently "fix" without checking intent.
-- The metric parser in `handleIngest` matches on the exact metric name (`claude_code.token.usage`, `claude_code.cost.usage`) and, for token usage, reads the `type` attribute (`input`/`output`/`cacheRead`/`cacheCreation`) off each **data point**, not off the metric name — Claude Code does not send separate metric names per token type. If you add new metric kinds, follow this same exact-name + data-point-attribute pattern rather than substring-matching `metric.name` (an earlier version of this parser did that and silently produced all-zero rows, since `metric.name` never contains `"input"`/`"output"` as a substring).
-- Claude Code's OTLP metrics exporter flushes periodically, not continuously — the interval is `OTEL_METRIC_EXPORT_INTERVAL` (default `60000`ms). If telemetry seems to be "missing," wait at least one interval (or lower it for local testing) before assuming the pipeline is broken.
-- Project attribution prefers `vcs.repository.name` (falls back to the `project.name` resource attribute, then `service.name`, then `'default-project'`). Unlike `project.name`/`service.name`, **`vcs.repository.name` is a data-point attribute, not a resource attribute** (confirmed against a real payload and the official docs — it's listed under "standard attributes shared by all metrics/events", alongside `session.id`, not under the resource block) — look for it on `dp.attributes`, not `resMetric.resource.attributes`, or the lookup will silently never match. It's only populated when the Claude Code session has `OTEL_METRICS_INCLUDE_REPOSITORY=true` set (CLI ≥ v2.1.269, default `false`) **and** the project directory is a git repo with a URL-shaped `origin` remote — omitted if there's no `origin` remote, the remote isn't URL-shaped, or the only enclosing repo is the user's home directory. `project.name` is derived from the session's custom name (`/rename`) if one was set, not from the repo/folder — a session with no custom name and no working `vcs.repository.name` falls all the way through to the literal fixed `service.name` value `'claude-code'`, which is why unrelated sessions can appear to collapse into one bucket on the dashboard.
-- `token_usage_logs.host_name`/`user_email` (see `specs/machine-and-user-attribution.md`) are best-effort, usually-null attribution columns. Claude Code has no auto-detected machine-name attribute at all — `host_name` only appears if the session's own `OTEL_RESOURCE_ATTRIBUTES` includes a literal `host.name=...` key (no shell expansion, off by default). `user_email` is Claude Code's real `user.email` standard attribute, but it's only sent on authenticated sessions — there's no `user.name`/OS-username attribute to fall back to. Whether either one actually lands on `resAttrs` (resource block) or `dp.attributes` (data point) wasn't confirmed against a real payload before implementing, unlike `vcs.repository.name` below — `handleIngest` defensively checks both locations for now. If you get a real payload with either attribute set, confirm which location it's actually in and simplify the lookup (and update this note) accordingly.
-- **The telemetry env vars (`CLAUDE_CODE_ENABLE_TELEMETRY`, `OTEL_*`) do not work in a project's own `.claude/settings.json` at all** — Claude Code only honors project-level settings files to *disable* telemetry, never to enable or configure it (confirmed via `/status` → "System diagnostics"). They must be set in the user's shell environment, `~/.claude/settings.json`, or managed settings. If ingestion looks completely dead (zero `/v1/metrics` hits via `wrangler tail` even during active use), check this first before suspecting the Worker.
-- Ingest auth is a single static bearer token compared with `===` (`INGEST_SECRET_TOKEN`, checked in `handleIngest`). Keep this simple unless asked to change the auth model.
-- Dashboard/API auth is HTTP Basic (`isDashboardAuthorized` in `index.ts`), separate from the ingest token, checked against `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD`. It's deliberately a different credential — the ingest token is meant for the OTLP exporter, not for humans typing a password into a browser prompt.
-- The `get_token_usage_*` and `get_cost_*` Postgres functions have `EXECUTE` revoked from `anon`/`authenticated` and granted only to `service_role` (see the migrations). This data isn't scoped by RLS/ownership, so if `anon`/`authenticated` could call them, anyone with the public anon key could read every project's usage. Keep that revoke/grant pattern for any new dashboard RPC.
-- `get_cost_table`/`get_cost_series` intentionally default `p_start`/`p_end` to `NULL` (meaning "no filter" / all-time), unlike `get_token_usage_series`/`get_token_usage_table`, which default to `now() - interval '7 days'`. This is deliberate — `specs/usd-per-project-dashboard.md` wants the Cost (USD) tab to default to all-time — not an inconsistency to "fix" by matching the other two.
+Claude metrics match exact names `claude_code.token.usage` / `claude_code.cost.usage`. Token type comes from each data point (`input`, `output`, `cacheRead`, `cacheCreation`), never a metric-name substring. Project attribution prefers data-point `vcs.repository.name`, then resource `project.name`, `service.name`, and the default. Claude's existing `claude-3-5-sonnet` model simplification is unchanged. Host/email are optional attribution only.
 
-## Codex ingestion and source filtering
+Codex uses usage-bearing `codex.sse_event` / `response.completed` logs plus reported `codex.turn_cost` estimates. Generic/failed completion notices are ignored. Read OTLP string/int/double AnyValues. Both cached-read and cache-write input are subtracted for disjoint categories; reasoning is already included in output. Invalid records count toward OTLP partial success; insert the accepted normalized records atomically. Do not invent dollars for versions without cost events. Do not double ingest usage from an additional translated metric stream.
 
-`/v1/logs` also persists usage-bearing Codex `codex.sse_event` / `response.completed` events and reported `codex.turn_cost` estimates. Other logs are still acknowledged without persistence. `source` is explicit (`claude` / `codex`); historical rows default to Claude. Codex input includes cached tokens, so store disjoint categories; reasoning tokens are already part of output. Model comes from Codex metadata, while the existing Claude model simplification remains unchanged.
+Source filters are independent per tab, while project names are tenant-scoped. Preserve source and date preferences during tenant switches but immediately clear old data/projects and invalidate/abort old requests. Keep unavailable selected project names to preserve an empty source/project intersection. Token defaults are seven days; cost defaults are all time. Session counts distinguish `(source,session_id)` within a tenant.
 
-All five dashboard RPCs accept optional `p_source`; validate the HTTP `source` parameter. Each dashboard tab remembers its source selection and filters its project list, chart, and table. Preserve the service-role-only grants and the different token/cost default date ranges. Apply the source migration before Worker deployment. Codex exports logs as OTLP/HTTP JSON configured under `[otel]` in user `~/.codex/config.toml`; see README.md for the exporter example and optional `project` query attribution. No new Worker secrets are required. Reported Codex costs are estimates and may be unavailable on older versions.
-
-Optional database integration tests use local `TEST_DATABASE_URL` only (`psql "$TEST_DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/source-filter.sql`); it is a connection string for a disposable migrated test database, never a Worker binding. Do not print it or commit it.
+Claude exporter settings must be set in the shell, user settings, or managed settings; project `.claude/settings.json` cannot enable/configure telemetry. Repository attribution needs CLI ≥2.1.269, `OTEL_METRICS_INCLUDE_REPOSITORY=true`, and a URL-shaped Git origin. Export flushes periodically, usually every 60 seconds. Codex uses user `[otel]` JSON log exporter configuration; `?project=` names a project only within the key's tenant.
 
 ## Secrets and variables reference
 
-Everything below is the full inventory — if you add a new secret or env var anywhere in this repo (Worker, migrations CI, Worker deploy CI, or the client-side telemetry setup this Worker ingests from), add it here too.
+Add every new runtime/test/client environment variable to this inventory. Never include values.
 
-### Worker secrets (`wrangler secret put`, read via the `Env` interface in `index.ts`)
+| Worker name | Purpose |
+| --- | --- |
+| `SUPABASE_URL` | Supabase API origin |
+| `SUPABASE_PUBLISHABLE_KEY` | Non-secret key for Auth/user-scoped requests |
+| `SUPABASE_SERVICE_ROLE_KEY` | Server-only ingestion, rate-limit and operator credential; never dashboard reads |
+| `APP_ORIGIN` | Exact canonical HTTPS origin for CSRF and invitation links |
+| `INVITATION_DELIVERY_URL` | Optional HTTPS mail integration accepting `{to,subject,text}` |
+| `INVITATION_DELIVERY_TOKEN` | Optional secret bearer credential for delivery integration |
 
-Not in `wrangler.toml` — set per-environment with `wrangler secret put <NAME>`, or locally via `.dev.vars` (gitignored) for `wrangler dev`.
+`DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired and must not authorize any route.
 
-| Name | Used for |
-|---|---|
-| `SUPABASE_URL` | Supabase project URL, passed to `createClient` in `handleIngest`/`handleTokenUsageApi`/`handleCostApi`. |
-| `SUPABASE_SERVICE_ROLE_KEY` | Supabase service-role key — bypasses RLS, required because `get_token_usage_*`/`get_cost_*` have `EXECUTE` revoked from `anon`/`authenticated`. Never print/log. |
-| `INGEST_SECRET_TOKEN` | Static bearer token checked (`===`) against the `Authorization` header on `/v1/metrics` and `/v1/logs`. Never print/log. |
-| `DASHBOARD_USERNAME` | HTTP Basic Auth username for `/dashboard/token-usage` and `/api/token-usage/*`/`/api/cost/*` (`isDashboardAuthorized`). |
-| `DASHBOARD_PASSWORD` | HTTP Basic Auth password, same check. Never print/log. |
+| Optional local test name | Purpose |
+| --- | --- |
+| `TEST_DATABASE_URL` | Fresh disposable PostgreSQL connection string for `test:postgres`; local-only, never a Worker binding; do not log or commit |
+| `TEST_AUTH_URL` | Loopback-only disposable GoTrue origin for `test:auth-live`; defaults to port 55433 |
+| `TEST_AUTH_JWT_SECRET` | Synthetic local Auth-container JWT signing secret for `test:auth-live`; never a production binding |
 
-### `wrangler.toml` (non-secret, committed)
+| GitHub Actions secret | Purpose |
+| --- | --- |
+| `SUPABASE_ACCESS_TOKEN` | Supabase CLI authentication |
+| `SUPABASE_PROJECT_ID` | Supabase project ref for migration link |
+| `SUPABASE_DB_PASSWORD` | Migration database access |
+| `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` | Worker deployment |
 
-Only `name`, `main`, `compatibility_date`, and the `[observability.*]` blocks — no secrets or environment-specific values belong here.
+| Telemetry client name (outside this Worker) | Purpose |
+| --- | --- |
+| `CLAUDE_CODE_ENABLE_TELEMETRY` | Enable Claude telemetry |
+| `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | Exporters (`otlp`, or `none` for opt-out) |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Claude uses `http/json` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Worker base origin |
+| `OTEL_EXPORTER_OTLP_HEADERS` | Tenant bearer header, never commit a real value |
+| `OTEL_METRICS_INCLUDE_REPOSITORY` | Include repository attribution |
+| `OTEL_METRIC_EXPORT_INTERVAL` | Export flush interval, default 60000 ms |
+| `OTEL_RESOURCE_ATTRIBUTES` | Optional literal host/user attribution |
+| `OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES` | Attach resource attributes |
 
-### GitHub Actions repo secrets
+## Development and verification
 
-| Name | Used by | Purpose |
-|---|---|---|
-| `SUPABASE_ACCESS_TOKEN` | `deploy-migrations.yml` | Auth for `supabase link`/`supabase db push`. |
-| `SUPABASE_PROJECT_ID` | `deploy-migrations.yml` | Target project ref for `supabase link`. |
-| `SUPABASE_DB_PASSWORD` | `deploy-migrations.yml` | DB password `supabase db push` needs to connect. |
-| `CLOUDFLARE_API_TOKEN` | `deploy-worker.yml`, `set-dashboard-credentials.yml` | Auth for `wrangler deploy`/`wrangler secret put`. |
-| `CLOUDFLARE_ACCOUNT_ID` | `deploy-worker.yml`, `set-dashboard-credentials.yml` | Target Cloudflare account. |
-| `DASHBOARD_USERNAME` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
-| `DASHBOARD_PASSWORD` | `set-dashboard-credentials.yml` (`workflow_dispatch`-only) | Pushed to the Worker secret of the same name via `wrangler secret put`. |
+Use the existing checkout in this isolated task; do not create worktrees unless requested. Node 24/npm 11 and `npm ci` reproduce dependencies. Application code targets workerd, not Node built-ins. New migrations append history; never edit an applied migration or weaken verification to install dependencies.
 
-### Optional local integration-test variables
+Run `npm test`, `npm run test:database`, `npm run test:dashboard`, `npx tsc --noEmit`, and `npx wrangler deploy --dry-run`. Coverage includes backend modules with a 90% floor; static HTML scripts have separate DOM tests. Mocked Supabase tests cannot prove RLS. Use the PostgreSQL suite for actual concurrent lock behavior and the optional Auth suite for OTP/refresh assumptions. Do not claim live email delivery or production validation from mocks.
 
-| Name | Used by | Purpose |
-|---|---|---|
-| `TEST_DATABASE_URL` | `psql` running `tests/source-filter.sql` | Local-only connection string for a disposable migrated test database. Optional; never a Worker binding or production database. May contain credentials: never print or commit it. |
+When fixing a bug: identify the precise symptom, examine parser/server/UI/Auth/database/CI cause categories, trace the actual root cause, check every affected path, and add positive/negative/edge regressions for each. Preserve existing telemetry behavior while closing authorization gaps. Do not stop at the first passing symptom check.
 
-### Claude Code telemetry client env vars (set outside this repo, on the machines sending telemetry — not Worker config)
-
-These configure the Claude Code CLI itself to export OTLP to this Worker. They only take effect in the user's shell environment, `~/.claude/settings.json`, or managed settings — **never** in a project's own `.claude/settings.json` (see below).
-
-| Name | Purpose | Default |
-|---|---|---|
-| `CLAUDE_CODE_ENABLE_TELEMETRY` | Turns telemetry export on. | off |
-| `OTEL_METRICS_EXPORTER` | Set to `otlp` to export metrics (or `none` to opt a project out, which *is* allowed in that project's own `.claude/settings.json`). | unset |
-| `OTEL_LOGS_EXPORTER` | Set to `otlp` to export logs/events (currently a no-op on this Worker's `/v1/logs`). | unset |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | e.g. `http/json`. | unset |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | This Worker's base URL. | unset |
-| `OTEL_EXPORTER_OTLP_HEADERS` | Carries `Authorization=Bearer <INGEST_SECRET_TOKEN>`. Never commit the real value into this repo. | unset |
-| `OTEL_METRICS_INCLUDE_REPOSITORY` | Sends `vcs.repository.name` (CLI ≥ v2.1.269) — needed for real project attribution instead of collapsing into `default-project`. | `false` |
-| `OTEL_METRIC_EXPORT_INTERVAL` | Export flush interval in ms. | `60000` |
-| `OTEL_RESOURCE_ATTRIBUTES` | Custom `key=value` resource attributes (e.g. `host.name=<literal-value>`, no shell expansion) feeding `token_usage_logs.host_name`/`user_email` — see `specs/machine-and-user-attribution.md`. | unset |
-| `OTEL_METRICS_INCLUDE_RESOURCE_ATTRIBUTES` | Whether `OTEL_RESOURCE_ATTRIBUTES` keys are actually attached to metrics. | `true` |
-
-## Secrets — handle with care
-
-- Project-level `.claude/settings.json` cannot configure telemetry (see "Working in this repo" above) and no longer carries the ingest token — the real `OTEL_EXPORTER_OTLP_HEADERS` bearer token now lives in the user's `~/.claude/settings.json` instead, outside this repo. **Never commit a real secret value into this repo's `.claude/settings.json`.** If you edit this file, flag to the user whether any value you add is a placeholder or a real credential before staging/committing it.
-- Never print or log `SUPABASE_SERVICE_ROLE_KEY`, `INGEST_SECRET_TOKEN`, or `DASHBOARD_PASSWORD` values.
-
-## Testing / running
-
-- `npm test` runs the `index.ts` unit suite (`index.test.ts`) via `vitest` + `@cloudflare/vitest-plugin` (so handlers run in a real `workerd` isolate, not a Node shim), with Istanbul coverage enforced at a 90% floor (statements/branches/functions/lines) in `vitest.config.ts`. `@supabase/supabase-js`'s `createClient` is mocked (`vi.mock`, hoisted via `vi.hoisted`) — tests never hit a real network or Supabase project, and don't need real secrets.
-- `dashboard.ts` is intentionally excluded from the coverage run: it's a template-string HTML page with plain browser JS and no bundler (see above), and there's no Workers-side logic in it to unit test — exercising its UI means actually opening `/dashboard/token-usage` in a browser.
-- When adding a case to `index.ts` (a new metric kind, a new API route, a new failure path), add the corresponding positive/negative/edge test(s) in `index.test.ts` rather than letting coverage regress below the threshold.
-- `npx tsc --noEmit` type-checks; `npx wrangler deploy --dry-run` bundles without deploying — run both after touching `index.ts` or `dashboard.ts`.
-- To exercise the worker locally: `npx wrangler dev`, then `curl` the `/v1/metrics` or `/v1/logs` endpoints with a Bearer token matching your local `INGEST_SECRET_TOKEN`, or open `/dashboard/token-usage` in a browser with `DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD` for Basic Auth. The dashboard needs a real Supabase connection (local or remote) with the `get_token_usage_*` functions migrated in, since there's no mock data path.
+CI validates, applies migrations, then deploys through one serialized workflow. The tenancy migration is a coordinated maintenance cutover; historical data remains unclaimed until an operator assigns a verified owner. Follow the runbook and do not deploy old global-auth code once multiple tenants exist. Do not perform production migration, publication, email sends or deletion merely to test a local change.

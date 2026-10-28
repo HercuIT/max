@@ -7,3 +7,6 @@ specs/*
 !specs/multi-tenant-rollout.md
 .env.local
 coverage/
+
+.dev.vars
+.wrangler/

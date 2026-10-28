@@ -1,6 +1,6 @@
 # Multi-tenant rollout and acceptance tests
 
-Status: proposed implementation plan for [multi-tenant support](multi-tenant-support.md) and its [Supabase architecture](supabase-tenancy.md).
+Status: implementation and release checklist for [multi-tenant support](multi-tenant-support.md) and its [Supabase architecture](supabase-tenancy.md).
 
 ## Phase 1: schema expansion and historical ownership
 

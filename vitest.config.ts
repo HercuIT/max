@@ -12,7 +12,7 @@ export default defineConfig({
             provider: 'istanbul',
             // dashboard.ts is a plain-JS-in-a-template-string HTML page with no bundler
             // (see CLAUDE.md) — there's no Workers-side logic in it to unit test here.
-            include: ['index.ts'],
+            include: ['index.ts', 'auth.ts', 'http.ts', 'tenancy.ts', 'telemetry.ts'],
             thresholds: {
                 lines: 90,
                 statements: 90,

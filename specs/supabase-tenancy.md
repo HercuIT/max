@@ -1,6 +1,6 @@
 # Supabase tenancy architecture
 
-Status: proposed. Implements the [multi-tenant product contract](multi-tenant-support.md); migration and test sequencing are in [rollout](multi-tenant-rollout.md).
+Status: implementation contract; production cutover is not automatic. Implements the [multi-tenant product contract](multi-tenant-support.md); migration and test sequencing are in [rollout](multi-tenant-rollout.md).
 
 ## Trust boundaries
 
@@ -72,7 +72,7 @@ Inside one transaction:
 1. Look up the key digest to identify its tenant without yet authorizing the request. Lock the tenant row first, then the key row, and recheck the digest/tenant association, revocation, expiry, and active tenant status under those locks. Revocation/deletion use the same ordering, so either an ingestion transaction completes before revocation or it is rejected after revocation commits.
 2. Validate row shape, count, supported source, non-negative amounts, integer token bounds, project-name limits, and required fields again at the database boundary. Ignore/reject any submitted tenant IDs or foreign project UUIDs.
 3. Derive every row's tenant UUID from the resolved key. Resolve/create each project with `(tenant_id,name)` uniqueness and set both tenant/project keys internally. Concurrent first ingestion for a project must converge on one project row.
-4. Insert the normalized rows, update last-used metadata, and return only inserted count. On any failure, roll back the entire batch.
+4. Insert the normalized rows, update last-used metadata, and return inserted count and resolved tenant/key UUIDs to the service-only caller for safe request logging; expose only count to the exporter. On any failure, roll back the entire batch.
 
 The same authorization check applies to an otherwise empty batch; revoked keys must not receive a success response just because the payload has no usable metrics. Non-usage log records are not stored. No user or exporter can call a general SQL or arbitrary-tenant insert operation.
 
