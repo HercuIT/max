@@ -21,7 +21,14 @@ export function clearSession(headers: Headers) {
     for (const name of Object.values(COOKIE)) setCookie(headers, name, '', 0);
 }
 function publicClient(env: Env) {
-    return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+    try {
+        if (!env.SUPABASE_URL?.trim() || !env.SUPABASE_PUBLISHABLE_KEY?.trim()) throw new Error();
+        return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+    } catch {
+        // SDK construction errors describe configuration, not a failed Auth request.
+        // Never return arbitrary exception text, which could contain credentials.
+        throw new ApiError(503, 'auth_configuration_error', UIStrings.text.authConfigurationError);
+    }
 }
 function authUnavailable(error: { status?: number } | null | undefined): boolean {
     return !!error && (error.status === 0 || (error.status !== undefined && error.status >= 500));
@@ -30,6 +37,7 @@ export interface Session { userId: string; client: SupabaseClient; }
 export async function sessionFor(request: Request, env: Env, headers: Headers): Promise<Session | null> {
     const jar = cookies(request);
     let access = jar.get(COOKIE.access);
+    if (!access && !jar.get(COOKIE.refresh)) return null;
     const client = publicClient(env);
     let user = access ? await client.auth.getUser(access) : null;
     if (!user?.data.user && jar.get(COOKIE.refresh)) {

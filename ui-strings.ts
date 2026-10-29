@@ -108,6 +108,7 @@ export class UIStrings {
         signOutFailed: 'Sign-out failed. Retry.',
         signInRequired: 'Sign in to access your organizations.',
         authUnavailable: 'Sign-in is temporarily unavailable. Retry shortly.',
+        authConfigurationError: 'Sign-in is not configured. Ask the operator to check the Worker SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY settings.',
         csrfFailed: 'Reload this page before submitting the form.',
         usePost: 'Use POST for this operation.',
         invalidEmail: 'Enter a valid email address.',
