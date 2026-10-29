@@ -125,6 +125,19 @@ describe('Codex OTLP value and metadata variants', () => {
 });
 
 describe('tenant HTTP boundary',()=>{
+ it('renders signed-out sign-in without initializing Supabase',async()=>{
+  const r=await worker.fetch(new Request('https://x/sign-in'),{...testEnv,SUPABASE_URL:'',SUPABASE_PUBLISHABLE_KEY:''});
+  expect(r.status).toBe(200);expect(await r.text()).toContain('<!doctype html>');expect(createClient).not.toHaveBeenCalled();
+ });
+ it.each(['SUPABASE_URL','SUPABASE_PUBLISHABLE_KEY'] as const)('reports missing %s as a configuration failure',async key=>{
+  const r=await worker.fetch(new Request('https://x/api/session',{headers:{Cookie:authCookie}}),{...testEnv,[key]:' '});
+  expect(r.status).toBe(503);expect(await r.json()).toMatchObject({code:'auth_configuration_error'});expect(createClient).not.toHaveBeenCalled();
+ });
+ it('sanitizes SDK configuration exceptions',async()=>{
+  createClient.mockImplementationOnce(()=>{throw new Error('private-configuration-value');});
+  const r=await call('/api/session');expect(r.status).toBe(503);
+  const body=await r.text();expect(body).toContain('auth_configuration_error');expect(body).not.toContain('private-configuration-value');
+ });
  it.each(['/dashboard/token-usage','/settings'])('redirects signed-out navigation %s',async path=>{const r=await call(path);expect(r.status).toBe(303);expect(r.headers.get('location')).toBe('/sign-in');});
  it('requires a session and removes Basic Auth/global reads',async()=>{
   expect((await call('/api/tenants')).status).toBe(401);
