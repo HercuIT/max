@@ -18,12 +18,34 @@ function saveSession(headers: Headers, session: { access_token: string; refresh_
     setCookie(headers, COOKIE.refresh, session.refresh_token, 7 * 86400);
 }
 export function clearSession(headers: Headers) {
-    for (const name of Object.values(COOKIE)) setCookie(headers, name, '', 0);
+    for (const name of [...Object.values(COOKIE), PKCE_COOKIE]) setCookie(headers, name, '', 0);
 }
-function publicClient(env: Env) {
+const PKCE_COOKIE = '__Host-burnrate-pkce';
+function publicClient(env: Env, pkce?: { request: Request; headers: Headers }) {
     try {
         if (!env.SUPABASE_URL?.trim() || !env.SUPABASE_PUBLISHABLE_KEY?.trim()) throw new Error();
-        return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+        const storageKey = 'burnrate-auth';
+        const verifierKey = `${storageKey}-code-verifier`;
+        const memory = new Map<string, string>();
+        const stored = pkce && cookies(pkce.request).get(PKCE_COOKIE);
+        if (stored && stored.length <= 2048) {
+            try { memory.set(verifierKey, decodeURIComponent(stored)); } catch { /* Invalid verifier cannot authenticate. */ }
+        }
+        return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: {
+            persistSession: !!pkce, autoRefreshToken: false, detectSessionInUrl: false,
+            ...(pkce ? { flowType: 'pkce' as const, storageKey, storage: {
+                getItem: (key: string) => memory.get(key) ?? null,
+                setItem: (key: string, value: string) => {
+                    memory.set(key, value);
+                    // Only the latest verifier persists; session tokens stay in request-local memory.
+                    if (key === verifierKey) setCookie(pkce.headers, PKCE_COOKIE, encodeURIComponent(value), 600);
+                },
+                removeItem: (key: string) => {
+                    memory.delete(key);
+                    if (key === verifierKey) setCookie(pkce.headers, PKCE_COOKIE, '', 0);
+                },
+            } } : {}),
+        } });
     } catch {
         // SDK construction errors describe configuration, not a failed Auth request.
         // Never return arbitrary exception text, which could contain credentials.
@@ -67,6 +89,24 @@ export function requireCsrf(request: Request, env: Env) {
         throw new ApiError(403, 'csrf_failed', UIStrings.text.csrfFailed);
     }
 }
+export async function handleAuthCallback(request: Request, env: Env, headers: Headers): Promise<Response> {
+    const fail = () => new Response(null, { status: 303, headers: { Location: '/sign-in?error=invalid_link' } });
+    if (request.method !== 'GET') throw new ApiError(405, 'method_not_allowed', UIStrings.text.requestRejected);
+    const url = new URL(request.url);
+    const code = url.searchParams.get('code');
+    const verifier = cookies(request).get(PKCE_COOKIE);
+    setCookie(headers, PKCE_COOKIE, '', 0);
+    if (url.origin !== env.APP_ORIGIN || url.searchParams.has('error') || !code || code.length > 2048 || !verifier || verifier.length > 2048) return fail();
+    await rateLimit(env, 'auth-ip', request.headers.get('CF-Connecting-IP') ?? 'unknown', 20);
+    const client = publicClient(env, { request, headers });
+    // Exchange uses the latest verifier's fixed slot; newer requests supersede older links.
+    const { data, error } = await client.auth.exchangeCodeForSession(code);
+    if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
+    if (error || !data.session) return fail();
+    saveSession(headers, data.session);
+    setCookie(headers, COOKIE.csrf, randomToken('csrf_'), 7 * 86400);
+    return new Response(null, { status: 303, headers: { Location: '/dashboard/token-usage' } });
+}
 export async function handleAuth(request: Request, env: Env, headers: Headers, session: Session | null): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/api/session' && request.method === 'GET') {
@@ -76,7 +116,7 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
     }
     if (request.method !== 'POST') throw new ApiError(405, 'method_not_allowed', UIStrings.text.usePost);
     requireCsrf(request, env);
-    const client = publicClient(env);
+    const client = publicClient(env, path === '/auth/sign-in' ? { request, headers } : undefined);
     if (path === '/auth/sign-out') {
         const jar = cookies(request);
         let access = jar.get(COOKIE.access);
@@ -112,7 +152,7 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
     const email = body.email.trim().toLowerCase();
     await rateLimit(env, 'auth-email', email, 5, 600);
     if (path === '/auth/sign-in') {
-        const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+        const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${env.APP_ORIGIN}/auth/callback` } });
         if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
         return jsonResponse({ message: UIStrings.text.codeSent });
     }

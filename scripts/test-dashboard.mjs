@@ -127,3 +127,13 @@ for (const filename of ['dashboard.ts', 'pages.ts']) {
  for (const [, key] of source.matchAll(/\bUI\.(\w+)/g)) assert(Object.hasOwn(UIStrings.text, key), filename + ': unknown UI string ' + key);
 }
 console.log('PASS: shared browser copy, interpolation parity, script-safe serialization and valid catalog references');
+
+// Callback errors use fixed UI copy rather than displaying provider query text.
+{
+ const fixture=pageFixture(signInHtml,'/sign-in?error=invalid_link&error_description=private-provider-details',async()=>({ok:true,status:200,json:async()=>({signedIn:false,csrf:'c'})}));
+ // pageFixture injects navigation only; query reading uses the real browser location.
+ await settle();
+ assert.equal(fixture.dom.window.document.getElementById('status').textContent,UIStrings.text.invalidSignInLink);
+ assert(!fixture.dom.window.document.body.textContent.includes('private-provider-details'));
+ fixture.dom.window.close();
+}

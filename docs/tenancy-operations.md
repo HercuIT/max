@@ -5,7 +5,7 @@ This is a breaking, fail-closed authorization cutover. Preparing code/tests does
 ## Before migration
 
 1. Back up the database and rehearse restore and migrations on a disposable copy. Record usage counts, per-project/source token sums and cost totals, and project names. Review table size and available lock/disk headroom. The committed all-at-once migration is retained as immutable history, but automatic deployment now refuses to apply it while pending. Use the staged procedure below for historical databases; never run its original large transaction against production.
-2. Provision Supabase Auth email OTP delivery, exact application origins, site URL and email template (`{{ .Token }}`). Identify the legacy owner's verified Auth UUID through an operator-controlled process. Never derive ownership from telemetry attributes or the first visitor.
+2. Provision Supabase Auth email OTP delivery, exact application origins, Site URL and exact `/auth/callback` redirect URL. Default email confirmation/magic-link templates work; optionally include `{{ .Token }}` for code entry. Identify the legacy owner's verified Auth UUID through an operator-controlled process. Never derive ownership from telemetry attributes or the first visitor.
 3. Configure `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `APP_ORIGIN`, and optionally the authenticated invitation delivery integration. Provide secret values securely through Worker/environment settings. No values are supplied by these docs.
 4. Pause legacy exporters/writes. Do not add a second tenant until schema, authorization, user sessions, and key cutover are validated. The previous Worker cannot write the new non-null tenant/project fields or call the new required-tenant RPC signatures.
 
