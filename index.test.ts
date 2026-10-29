@@ -279,6 +279,31 @@ describe('review regression checks',()=>{
 
 
 describe('PKCE email sign-in',()=>{
+ it.each([429,400,503])('reports rejected resend %s without replacing the pending link verifier',async status=>{
+  signInWithOtp.mockImplementationOnce(async()=>{
+   const options=(createClient.mock.calls as unknown as any[][]).find(c=>c[2]?.auth?.flowType==='pkce')?.[2] as any;
+   options.auth.storage.setItem('burnrate-auth-flow-ijklmnop-code-verifier',JSON.stringify('replacement-verifier'));
+   return {error:{status,message:'private-provider-details'}};
+  });
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'},{Cookie:'__Host-burnrate-csrf=csrf; __Host-burnrate-pkce-abcdefgh='+encodeURIComponent(JSON.stringify('existing-verifier'))});
+  expect(r.status).toBe(status);
+  expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-pkce');
+  const body:any=await r.json();
+  expect(body.message).toBeUndefined();expect(body.error).not.toContain('private-provider-details');
+  if(status===429)expect(body.code).toBe('auth_email_rate_limited');
+ });
+ it('explains the application email limit without calling Supabase Auth',async()=>{
+  rpc.mockResolvedValueOnce({data:true,error:null}).mockResolvedValueOnce({data:false,error:null});
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'});
+  expect(r.status).toBe(429);expect(await r.json()).toMatchObject({code:'auth_email_rate_limited',error:expect.stringContaining('ten minutes')});
+  expect(r.headers.get('retry-after')).toBe('600');
+  expect(signInWithOtp).not.toHaveBeenCalled();
+ });
+ it('preserves the latest pending verifier when an expired email returns an error',async()=>{
+  const r=await call('/auth/callback?sb_flow_id=abcdefgh&error=access_denied&error_code=otp_expired','GET',undefined,{Cookie:'__Host-burnrate-pkce-abcdefgh=latest-verifier'});
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');
+  expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-pkce=');
+ });
  it('preserves pending flows during stale-session cleanup but cancels them on sign-out',async()=>{
   const pending='__Host-burnrate-pkce-abcdefgh='+encodeURIComponent(JSON.stringify('verifier'));
   const stale=await call('/api/session','GET',undefined,{Cookie:authCookie+'; '+pending});
@@ -386,7 +411,7 @@ describe('PKCE email sign-in',()=>{
  it('rejects expired or mismatched codes without leaking Auth errors',async()=>{
   exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:400,message:'private'}});
   const r=await call('/auth/callback?sb_flow_id=abcdefgh&code=used','GET',undefined,{Cookie:cookie});
-  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect(r.headers.get('set-cookie')).not.toContain('__Host-burnrate-access=access');
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect((r.headers.get('set-cookie')??'')).not.toContain('__Host-burnrate-access=access');
  });
  it('reports upstream outages safely',async()=>{
   exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:503}});

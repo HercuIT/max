@@ -106,14 +106,15 @@ export async function handleAuthCallback(request: Request, env: Env, headers: He
     const flowId = url.searchParams.get('sb_flow_id');
     if (!flowId || !FLOW_ID.test(flowId)) return fail();
     const verifier = cookies(request).get(flowCookie(flowId));
-    setCookie(headers, flowCookie(flowId), '', 0);
     if (url.origin !== env.APP_ORIGIN || url.searchParams.has('error') || !code || code.length > 2048 || !verifier || verifier.length > 2048) return fail();
     await rateLimit(env, 'auth-ip', request.headers.get('CF-Connecting-IP') ?? 'unknown', 20);
-    const client = publicClient(env, { request, headers });
+    const exchangeHeaders = new Headers();
+    const client = publicClient(env, { request, headers: exchangeHeaders });
     // Consume only the verifier belonging to this callback, preserving other pending links.
     const { data, error } = await client.auth.exchangeCodeForSession(code, { flowId });
     if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
     if (error || !data.session) return fail();
+    setCookie(headers, flowCookie(flowId), '', 0);
     saveSession(headers, data.session);
     setCookie(headers, COOKIE.csrf, randomToken('csrf_'), 7 * 86400);
     return new Response(null, { status: 303, headers: { Location: '/dashboard/token-usage' } });
@@ -127,7 +128,9 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
     }
     if (request.method !== 'POST') throw new ApiError(405, 'method_not_allowed', UIStrings.text.usePost);
     requireCsrf(request, env);
-    const client = publicClient(env, path === '/auth/sign-in' ? { request, headers } : undefined);
+    // A rejected resend must not replace the verifier for the last delivered email.
+    const pendingHeaders = new Headers();
+    const client = publicClient(env, path === '/auth/sign-in' ? { request, headers: pendingHeaders } : undefined);
     if (path === '/auth/sign-out') {
         const jar = cookies(request);
         let access = jar.get(COOKIE.access);
@@ -165,10 +168,18 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
         throw new ApiError(400, 'invalid_email', UIStrings.text.invalidEmail);
     }
     const email = body.email.trim().toLowerCase();
-    await rateLimit(env, 'auth-email', email, 5, 600);
+    try {
+        await rateLimit(env, 'auth-email', email, 5, 600);
+    } catch (error) {
+        if (error instanceof ApiError && error.status === 429) throw new ApiError(429, 'auth_email_rate_limited', UIStrings.text.authEmailRateLimited);
+        throw error;
+    }
     if (path === '/auth/sign-in') {
         const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${env.APP_ORIGIN}/auth/callback` } });
         if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
+        if (error?.status === 429) throw new ApiError(429, 'auth_email_rate_limited', UIStrings.text.authEmailRateLimited);
+        if (error) throw new ApiError(400, 'auth_email_not_sent', UIStrings.text.authEmailNotSent);
+        for (const value of pendingHeaders.getSetCookie()) headers.append('Set-Cookie', value);
         return jsonResponse({ message: UIStrings.text.codeSent });
     }
     if (path === '/auth/verify') {
