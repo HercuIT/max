@@ -18,31 +18,40 @@ function saveSession(headers: Headers, session: { access_token: string; refresh_
     setCookie(headers, COOKIE.refresh, session.refresh_token, 7 * 86400);
 }
 export function clearSession(headers: Headers) {
-    for (const name of [...Object.values(COOKIE), PKCE_COOKIE]) setCookie(headers, name, '', 0);
+    for (const name of Object.values(COOKIE)) setCookie(headers, name, '', 0);
 }
 const PKCE_COOKIE = '__Host-burnrate-pkce';
+const FLOW_ID = /^[a-zA-Z0-9_-]{8,64}$/;
+function flowCookie(id: string) { return `${PKCE_COOKIE}-${id}`; }
 function publicClient(env: Env, pkce?: { request: Request; headers: Headers }) {
     try {
         if (!env.SUPABASE_URL?.trim() || !env.SUPABASE_PUBLISHABLE_KEY?.trim()) throw new Error();
         const storageKey = 'burnrate-auth';
-        const verifierKey = `${storageKey}-code-verifier`;
         const memory = new Map<string, string>();
-        const stored = pkce && cookies(pkce.request).get(PKCE_COOKIE);
-        if (stored && stored.length <= 2048) {
-            try { memory.set(verifierKey, decodeURIComponent(stored)); } catch { /* Invalid verifier cannot authenticate. */ }
+        // Persist SDK per-flow slots, never its shared legacy verifier slot.
+        if (pkce) for (const [name, value] of cookies(pkce.request)) {
+            const id = name.slice(PKCE_COOKIE.length + 1);
+            if (!name.startsWith(PKCE_COOKIE + '-') || !FLOW_ID.test(id) || value.length > 2048) continue;
+            try { memory.set(`${storageKey}-flow-${id}-code-verifier`, decodeURIComponent(value)); } catch { /* Invalid verifier cannot authenticate. */ }
         }
+        const cookieForKey = (key: string) => {
+            const id = key.match(/^burnrate-auth-flow-([a-zA-Z0-9_-]{8,64})-code-verifier$/)?.[1];
+            return id ? flowCookie(id) : null;
+        };
         return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: {
             persistSession: !!pkce, autoRefreshToken: false, detectSessionInUrl: false,
-            ...(pkce ? { flowType: 'pkce' as const, storageKey, storage: {
+            ...(pkce ? { flowType: 'pkce' as const, experimental: { appendPkceFlowIdToRedirects: true }, storageKey, storage: {
                 getItem: (key: string) => memory.get(key) ?? null,
                 setItem: (key: string, value: string) => {
                     memory.set(key, value);
-                    // Only the latest verifier persists; session tokens stay in request-local memory.
-                    if (key === verifierKey) setCookie(pkce.headers, PKCE_COOKIE, encodeURIComponent(value), 600);
+                    // Request-specific names prevent out-of-order responses from overwriting other flows.
+                    const name = cookieForKey(key);
+                    if (name) setCookie(pkce.headers, name, encodeURIComponent(value), 600);
                 },
                 removeItem: (key: string) => {
                     memory.delete(key);
-                    if (key === verifierKey) setCookie(pkce.headers, PKCE_COOKIE, '', 0);
+                    const name = cookieForKey(key);
+                    if (name) setCookie(pkce.headers, name, '', 0);
                 },
             } } : {}),
         } });
@@ -94,13 +103,15 @@ export async function handleAuthCallback(request: Request, env: Env, headers: He
     if (request.method !== 'GET') throw new ApiError(405, 'method_not_allowed', UIStrings.text.requestRejected);
     const url = new URL(request.url);
     const code = url.searchParams.get('code');
-    const verifier = cookies(request).get(PKCE_COOKIE);
-    setCookie(headers, PKCE_COOKIE, '', 0);
+    const flowId = url.searchParams.get('sb_flow_id');
+    if (!flowId || !FLOW_ID.test(flowId)) return fail();
+    const verifier = cookies(request).get(flowCookie(flowId));
+    setCookie(headers, flowCookie(flowId), '', 0);
     if (url.origin !== env.APP_ORIGIN || url.searchParams.has('error') || !code || code.length > 2048 || !verifier || verifier.length > 2048) return fail();
     await rateLimit(env, 'auth-ip', request.headers.get('CF-Connecting-IP') ?? 'unknown', 20);
     const client = publicClient(env, { request, headers });
-    // Exchange uses the latest verifier's fixed slot; newer requests supersede older links.
-    const { data, error } = await client.auth.exchangeCodeForSession(code);
+    // Consume only the verifier belonging to this callback, preserving other pending links.
+    const { data, error } = await client.auth.exchangeCodeForSession(code, { flowId });
     if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
     if (error || !data.session) return fail();
     saveSession(headers, data.session);
@@ -122,6 +133,10 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
         let access = jar.get(COOKIE.access);
         let remoteRevoked = false;
         clearSession(headers);
+        // Explicit sign-out cancels pending flows; ordinary stale-session cleanup does not.
+        for (const name of jar.keys()) {
+            if (name === PKCE_COOKIE || (name.startsWith(PKCE_COOKIE + '-') && FLOW_ID.test(name.slice(PKCE_COOKIE.length + 1)))) setCookie(headers, name, '', 0);
+        }
         if (jar.get(COOKIE.refresh)) {
             try {
                 const { data, error } = await client.auth.refreshSession({ refresh_token: jar.get(COOKIE.refresh)! });
