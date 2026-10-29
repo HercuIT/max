@@ -51,6 +51,14 @@ Add every new runtime/test/client environment variable to this inventory. Never 
 
 `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired and must not authorize any route.
 
+| Supabase Edge Function secret | Purpose |
+| --- | --- |
+| `INVITATION_DELIVERY_TOKEN` | Shared server-to-server bearer token; must match the Worker secret |
+| `RESEND_API_KEY` | Resend sending credential, restricted to the verified sending domain where possible |
+| `INVITATION_FROM_EMAIL` | Sender address on a Resend-verified domain; optionally includes a display name |
+
+These are set on Supabase, not as additional Worker bindings. Never log email payloads or provider errors.
+
 | Optional local test name | Purpose |
 | --- | --- |
 | `TENANCY_DATABASE_URL` | Operator-only database credential for staged maintenance rollout; never a Worker binding, never log or commit |
