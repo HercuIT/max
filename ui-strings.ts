@@ -137,7 +137,7 @@ export class UIStrings {
         invitationEmail: 'Sign in with this email, then accept your organization invitation: {url}',
         invitationDeliveryFailed: 'The invitation was created, but the email could not be sent. Retry delivery or revoke it.',
         invitationDeliveryUnavailable: 'Invitation email delivery is unavailable. Check the delivery configuration and retry.',
-        methodNotAllowed: 'Use the supported HTTP method.',
+        invitationProviderFailed: 'The email provider could not confirm acceptance. Retry delivery or check the provider status.',
         unauthorized: 'Unauthorized',
         invalidTelemetry: 'Check OTLP resource, scope, and record arrays.',
         logsAcknowledged: 'Logs acknowledged',

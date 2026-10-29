@@ -33,7 +33,7 @@ On Cloudflare, configure:
 
 ## Verification and failures
 
-`npm test` exercises authorization, body/field validation, provider acceptance/rejection, timeouts/network failures, and safe responses using mocked delivery. It sends no real email. After deployment, create an invitation to an approved test recipient from organization settings and verify receipt and acceptance. Do not use a production recipient merely for an automated smoke check.
+`npm test` exercises authorization, accepted field boundaries, JSON charset parameters, body/field rejection, provider acceptance/rejection, network failures, and safe responses using mocked delivery. A stalled-delivery test waits for the actual eight-second signal deadline, verifies that it aborts, and checks the resulting 502 response. Tests send no real email. After deployment, create an invitation to an approved test recipient from organization settings and verify receipt and acceptance. Do not use a production recipient merely for an automated smoke check.
 
 HTTP 200 means Resend accepted the message and returned an email ID; it does not guarantee inbox delivery. Monitor bounces/delivery in Resend. Invalid credentials return 401; missing configuration returns 503; invalid requests return 400/413/415/405; provider rejection, malformed response, timeout, or network failure returns 502. Responses never include provider details, tokens, or the email body. Requests have a 16 KiB body limit, one recipient, a 200-character subject limit, a 10,000-character text limit, and an eight-second provider timeout (inside the Worker's ten-second delivery timeout).
 

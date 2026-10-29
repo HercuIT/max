@@ -23,7 +23,11 @@ async function sameToken(actual: string, expected: string): Promise<boolean> {
 }
 
 export async function handleInvitation(request: Request, config: MailConfig, send: typeof fetch = fetch): Promise<Response> {
-    if (request.method !== 'POST') return reply(405, UIStrings.text.methodNotAllowed);
+    if (request.method !== 'POST') {
+        const response = reply(405, UIStrings.text.usePost);
+        response.headers.set('Allow', 'POST');
+        return response;
+    }
     const { INVITATION_DELIVERY_TOKEN: token, RESEND_API_KEY: apiKey, INVITATION_FROM_EMAIL: from } = config;
     if (!token?.trim() || !apiKey?.trim() || !from?.trim()) return reply(503, UIStrings.text.invitationDeliveryUnavailable);
     const authorization = request.headers.get('Authorization') ?? '';
@@ -68,12 +72,12 @@ export async function handleInvitation(request: Request, config: MailConfig, sen
         });
         if (!response.ok) {
             await response.body?.cancel();
-            return reply(502, UIStrings.text.invitationDeliveryUnavailable);
+            return reply(502, UIStrings.text.invitationProviderFailed);
         }
         const result = await response.json() as { id?: unknown } | null;
-        if (!result || typeof result.id !== 'string' || !result.id.trim()) return reply(502, UIStrings.text.invitationDeliveryUnavailable);
+        if (!result || typeof result.id !== 'string' || !result.id.trim()) return reply(502, UIStrings.text.invitationProviderFailed);
         return reply(200);
     } catch {
-        return reply(502, UIStrings.text.invitationDeliveryUnavailable);
+        return reply(502, UIStrings.text.invitationProviderFailed);
     }
 }
