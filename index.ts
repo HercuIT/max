@@ -2,7 +2,7 @@ import { UIStrings } from './ui-strings';
 import { tokenUsageDashboardHtml } from './dashboard';
 import { signInHtml, settingsHtml, invitationHtml } from './pages';
 import { faviconAssets } from './assets';
-import { handleAuth, requireCsrf, sessionFor } from './auth';
+import { handleAuth, handleAuthCallback, requireCsrf, sessionFor } from './auth';
 import { ApiError, databaseError, digest, jsonResponse, rateLimit, readJson, serviceClient } from './http';
 import { handleTenantApi } from './tenancy';
 import { parseClaudeMetrics, parseCodexLogs, TelemetryLimitError } from './telemetry';
@@ -57,6 +57,7 @@ export default {
             const url = new URL(request.url);
             const asset = handleFaviconAsset(url.pathname);
             if (asset) response = asset;
+            else if (url.pathname === '/auth/callback') response = await handleAuthCallback(request, env, headers);
             else if (url.pathname === '/v1/metrics' || url.pathname === '/v1/logs') response = await handleIngest(request, env, url, requestId);
             else {
                 const session = url.pathname === '/auth/sign-out' ? null : await sessionFor(request, env, headers);

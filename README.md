@@ -36,7 +36,7 @@ The delivery integration receives `{ "to": "email", "subject": "text", "text": "
 
 The included Supabase Edge Function implements this contract with Resend. See [invitation email deployment](docs/invitation-email.md) for its secrets, deployment command, and Worker configuration.
 
-Configure Supabase Auth's email OTP template to include `{{ .Token }}`, set the site URL to `APP_ORIGIN`, and restrict allowed redirects to your application origins. This implementation verifies emailed codes directly; it does not accept arbitrary callback/return URLs. Configure a seven-day maximum session lifetime in Supabase to match the refresh cookie, a suitable idle timeout, and email OTP rate limits. The application additionally enforces shared database-backed limits: 20 Auth requests per IP/minute, 5 per email/10 minutes, 120 ingestion requests per IP/minute, 600 per key/minute, and 60 administration mutations per user/minute. Tune these in code with measured deployment traffic; do not replace them with per-isolate counters.
+Set Supabase Auth's Site URL to `APP_ORIGIN` and add `APP_ORIGIN/auth/callback?sb_flow_id=*` to Redirect URLs (replace `APP_ORIGIN` with the canonical HTTPS origin). The wildcard covers only the random flow ID query value; the origin and callback path remain fixed. Default Confirm signup and Magic Link templates work with PKCE email links. To also offer code entry, include `{{ .Token }}` in both templates. Links must open in the same browser that requested them within ten minutes; concurrent requests keep separate verifier cookies bound to their callback flow IDs. The callback exchanges the code server-side, clears the temporary HttpOnly verifier cookie, and redirects to the dashboard after a successful exchange. Invalid links return to sign-in, and Auth outages return HTTP 503; arbitrary return URLs are ignored. Configure a seven-day maximum session lifetime in Supabase to match the refresh cookie, a suitable idle timeout, and email OTP rate limits. The application additionally enforces shared database-backed limits: 20 Auth requests per IP/minute, 5 per email/10 minutes, 120 ingestion requests per IP/minute, 600 per key/minute, and 60 administration mutations per user/minute. Tune these in code with measured deployment traffic; do not replace them with per-isolate counters.
 
 `TENANCY_DATABASE_URL` is a separate operator-only database connection for the [staged maintenance rollout](docs/tenancy-operations.md), never a Worker binding. `TEST_DATABASE_URL` is reserved for fresh disposable PostgreSQL integration databases.
 
@@ -44,7 +44,7 @@ The former `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN`
 
 ## Dashboard and administration
 
-- `/sign-in`: email code sign-in.
+- `/sign-in`: email-link sign-in, with optional code entry.
 - `/dashboard/token-usage`: tenant chooser plus Token Usage and Cost (USD) tabs.
 - `/settings`: members, roles, invitations, key creation/revocation, organization rename, leave, and owner-only deletion requests.
 - `/invite#<one-time-token>`: removes the fragment immediately, then accepts via authenticated POST. Sign in in another tab if necessary; keep the invitation page open until acceptance.
@@ -63,6 +63,7 @@ All tenant API responses are `no-store`. Cookie-authenticated mutations require 
 | --- | --- |
 | `GET /api/session` | Signed-in state and CSRF token |
 | `POST /auth/sign-in`, `/auth/verify`, `/auth/sign-out` | Email code and cookie lifecycle |
+| `GET /auth/callback` | PKCE email-link exchange; fixed dashboard redirect |
 | `GET /api/tenants` | Current memberships only |
 | `GET /api/tenants/:id/token-usage/projects` | Project names within tenant/source |
 | `GET /api/tenants/:id/token-usage/series`, `/token-usage/table` | Token chart/table |

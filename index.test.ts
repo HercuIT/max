@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-const { insert, rpc, getUser, refreshSession, signInWithOtp, verifyOtp, signOut, createClient } = vi.hoisted(() => {
+const { insert, rpc, getUser, refreshSession, signInWithOtp, verifyOtp, signOut, exchangeCodeForSession, createClient } = vi.hoisted(() => {
  const insert=vi.fn(); const rpc=vi.fn(); const getUser=vi.fn(); const refreshSession=vi.fn();
- const signInWithOtp=vi.fn(); const verifyOtp=vi.fn(); const signOut=vi.fn();
- const createClient=vi.fn(()=>({rpc,auth:{getUser,refreshSession,signInWithOtp,verifyOtp,admin:{signOut}}}));
- return {insert,rpc,getUser,refreshSession,signInWithOtp,verifyOtp,signOut,createClient};
+ const signInWithOtp=vi.fn(); const verifyOtp=vi.fn(); const signOut=vi.fn(); const exchangeCodeForSession=vi.fn();
+ const createClient=vi.fn(()=>({rpc,auth:{getUser,refreshSession,signInWithOtp,verifyOtp,exchangeCodeForSession,admin:{signOut}}}));
+ return {insert,rpc,getUser,refreshSession,signInWithOtp,verifyOtp,signOut,exchangeCodeForSession,createClient};
 });
 vi.mock('@supabase/supabase-js',()=>({createClient}));
 import worker, {parseCodexLogs, type Env} from './index';
@@ -16,6 +16,7 @@ const testEnv:Env={SUPABASE_URL:'https://example.supabase.test',SUPABASE_PUBLISH
 const authCookie='__Host-burnrate-access=valid; __Host-burnrate-csrf=csrf';
 beforeEach(()=>{
  vi.clearAllMocks(); vi.unstubAllGlobals();
+ exchangeCodeForSession.mockResolvedValue({data:{session:{access_token:'access',refresh_token:'refresh',expires_in:3600}},error:null});
  insert.mockResolvedValue({error:null});
  getUser.mockResolvedValue({data:{user:null},error:null});
  refreshSession.mockResolvedValue({data:{session:null},error:null});
@@ -273,5 +274,127 @@ describe('review regression checks',()=>{
  it('returns Claude partial-success counts and inserts only valid points',async()=>{
   const r=await call('/v1/metrics','POST',{resourceMetrics:[{scopeMetrics:[{metrics:[{name:'claude_code.token.usage',sum:{dataPoints:[{asInt:'NaN',attributes:[{key:'type',value:{stringValue:'input'}}]},{asInt:'7',attributes:[{key:'type',value:{stringValue:'input'}}]}]}}]}]}]}, {Authorization:'Bearer brk_'+'a'.repeat(64)});
   expect(r.status).toBe(200);expect(await r.json()).toMatchObject({count:1,partialSuccess:{rejectedDataPoints:'1'}});expect(insert.mock.calls[0][0]).toHaveLength(1);
+ });
+});
+
+
+describe('PKCE email sign-in',()=>{
+ it('preserves pending flows during stale-session cleanup but cancels them on sign-out',async()=>{
+  const pending='__Host-burnrate-pkce-abcdefgh='+encodeURIComponent(JSON.stringify('verifier'));
+  const stale=await call('/api/session','GET',undefined,{Cookie:authCookie+'; '+pending});
+  expect(stale.headers.get('set-cookie')).toContain('__Host-burnrate-access=;');
+  expect(stale.headers.get('set-cookie')).not.toContain('__Host-burnrate-pkce');
+  const callback=await call('/auth/callback?sb_flow_id=abcdefgh&code=valid','GET',undefined,{Cookie:pending});
+  expect(callback.headers.get('location')).toBe('/dashboard/token-usage');
+  const logout=await call('/auth/sign-out','POST',{}, {Cookie:authCookie+'; '+pending});
+  expect(logout.headers.get('set-cookie')).toContain('__Host-burnrate-pkce-abcdefgh=;');
+ });
+ it('keeps both SDK flows usable when the older response arrives last',async()=>{
+  const actual=await vi.importActual<typeof import('@supabase/supabase-js')>('@supabase/supabase-js');
+  const defaultFactory=createClient.getMockImplementation()!;
+  createClient.mockImplementation(((...args:any[])=>args[2]?.auth?.flowType==='pkce'?actual.createClient(args[0],args[1],args[2]):(defaultFactory as any)(...args)) as any);
+  const pending:Array<{url:string,body:any,resolve:(response:Response)=>void}>=[];
+  const tokens:any[]=[];
+  vi.stubGlobal('fetch',vi.fn((url:string,options:any)=>{
+   if(String(url).includes('/otp'))return new Promise<Response>(resolve=>pending.push({url:String(url),body:JSON.parse(options.body),resolve}));
+   tokens.push(JSON.parse(options.body));
+   return Promise.resolve(Response.json({access_token:'access',refresh_token:'refresh',expires_in:3600,token_type:'bearer',user:{id:other}}));
+  }));
+  try{
+   const first=call('/auth/sign-in','POST',{email:'first@example.test'},{Cookie:'__Host-burnrate-csrf=csrf'});
+   await vi.waitFor(() => expect(pending.length).toBe(1));
+   const second=call('/auth/sign-in','POST',{email:'second@example.test'},{Cookie:'__Host-burnrate-csrf=csrf'});
+   await vi.waitFor(() => expect(pending.length).toBe(2));
+   pending[1].resolve(Response.json({}));const newer=await second;
+   pending[0].resolve(Response.json({}));const older=await first;
+   const jar=new Map<string,string>();
+   for(const response of [newer,older])for(const cookie of response.headers.getSetCookie()){
+    const pair=cookie.split(';')[0];const eq=pair.indexOf('=');jar.set(pair.slice(0,eq),pair.slice(eq+1));
+   }
+   expect(jar.size).toBe(2);
+   for(let i=0;i<2;i++){
+    const flowId=new URL(new URL(pending[i].url).searchParams.get('redirect_to')!).searchParams.get('sb_flow_id');
+    const verifier=JSON.parse(decodeURIComponent(jar.get('__Host-burnrate-pkce-'+flowId)!));
+    const response=await call('/auth/callback?sb_flow_id='+flowId+'&code=code-'+i,'GET',undefined,{Cookie:[...jar].map(([k,v])=>k+'='+v).join('; ')});
+    expect(response.headers.get('location')).toBe('/dashboard/token-usage');
+    expect(tokens[i]).toMatchObject({auth_code:'code-'+i,code_verifier:verifier});
+    expect(response.headers.getSetCookie().filter(c=>c.startsWith('__Host-burnrate-pkce-')).every(c=>c.startsWith('__Host-burnrate-pkce-'+flowId+'='))).toBe(true);
+   }
+  }finally{createClient.mockImplementation(defaultFactory);}
+ });
+
+ it('uses the real SDK to generate a PKCE challenge and verifier cookie',async()=>{
+  const actual=await vi.importActual<typeof import('@supabase/supabase-js')>('@supabase/supabase-js');
+  createClient.mockImplementationOnce(((...args:any[])=>actual.createClient(args[0],args[1],args[2])) as any);
+  const fetcher=vi.fn().mockResolvedValue(new Response('{}',{status:200,headers:{'Content-Type':'application/json'}}));
+  vi.stubGlobal('fetch',fetcher);
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'},{Cookie:'__Host-burnrate-csrf=csrf'});
+  expect(r.status).toBe(200);
+  const cookieHeader=r.headers.get('set-cookie')!;
+  expect(cookieHeader).toContain('__Host-burnrate-pkce-');
+  expect(cookieHeader).toContain('Max-Age=600');
+  expect(cookieHeader).not.toContain('__Host-burnrate-access=');
+  const otpCall=fetcher.mock.calls.find(c=>String(c[0]).includes('/otp'))!;
+  const body=JSON.parse(otpCall[1].body);
+  expect(body.code_challenge_method).toBe('s256');
+  expect(body.code_challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(String(otpCall[0])).toContain('redirect_to=');
+  const verifierCookie=cookieHeader.split(';')[0];
+  const savedVerifier=JSON.parse(decodeURIComponent(verifierCookie.slice(verifierCookie.indexOf('=')+1)));
+  // Callback rate limiter still uses the mocked service client; exchange uses the real SDK.
+  createClient.mockImplementationOnce(()=>({rpc,auth:{getUser,refreshSession,signInWithOtp,verifyOtp,exchangeCodeForSession,admin:{signOut}}}));
+  createClient.mockImplementationOnce(((...args:any[])=>actual.createClient(args[0],args[1],args[2])) as any);
+  fetcher.mockResolvedValueOnce(Response.json({access_token:'test-access',refresh_token:'test-refresh',expires_in:3600,token_type:'bearer',user:{id:other}}));
+  const flowId=new URL(new URL(String(otpCall[0])).searchParams.get('redirect_to')!).searchParams.get('sb_flow_id');
+  const callback=await call('/auth/callback?sb_flow_id='+flowId+'&code=single-use','GET',undefined,{Cookie:verifierCookie});
+  expect(callback.status).toBe(303);
+  expect(callback.headers.get('location')).toBe('/dashboard/token-usage');
+  expect(callback.headers.get('set-cookie')).toContain('__Host-burnrate-access=test-access');
+  const tokenCall=fetcher.mock.calls.find(c=>String(c[0]).includes('/token'))!;
+  expect(JSON.parse(tokenCall[1].body)).toMatchObject({auth_code:'single-use',code_verifier:savedVerifier});
+ });
+ const cookie='__Host-burnrate-pkce-abcdefgh='+encodeURIComponent(JSON.stringify('verifier'));
+ it('requests a fixed callback and persists only the verifier',async()=>{
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'});
+  expect(r.status).toBe(200);
+  expect(signInWithOtp).toHaveBeenCalledWith({email:'a@example.test',options:{shouldCreateUser:true,emailRedirectTo:'https://x/auth/callback'}});
+  const options=(createClient.mock.calls as unknown as any[][]).find(c=>c[2]?.auth?.flowType==='pkce')?.[2] as any;
+  expect(options.auth.persistSession).toBe(true);
+  const storage=options.auth.storage;
+  storage.setItem('burnrate-auth-flow-abcdefgh-code-verifier',JSON.stringify('verifier'));
+  storage.setItem('burnrate-auth','private-session');
+  expect(storage.getItem('burnrate-auth-flow-abcdefgh-code-verifier')).toBe(JSON.stringify('verifier'));
+  storage.removeItem('burnrate-auth-flow-abcdefgh-code-verifier');
+  expect(storage.getItem('burnrate-auth-flow-abcdefgh-code-verifier')).toBe(null);
+ });
+ it('exchanges the code, sets secure sessions and ignores return URLs',async()=>{
+  const r=await call('/auth/callback?sb_flow_id=abcdefgh&code=one-time&next=https://evil.test','GET',undefined,{Cookie:cookie});
+  expect(r.status).toBe(303);expect(r.headers.get('location')).toBe('/dashboard/token-usage');
+  expect(exchangeCodeForSession).toHaveBeenCalledWith('one-time',{flowId:'abcdefgh'});
+  expect(r.headers.get('set-cookie')).toContain('__Host-burnrate-access=access');
+  expect(r.headers.get('set-cookie')).toContain('HttpOnly; Secure; SameSite=Lax');
+  expect(r.headers.get('set-cookie')).toContain('__Host-burnrate-pkce-abcdefgh=;');
+  expect(r.headers.get('cache-control')).toBe('no-store');
+  expect(await r.text()).not.toContain('refresh');
+  const options=(createClient.mock.calls as unknown as any[][]).find(c=>c[2]?.auth?.flowType==='pkce')?.[2] as any;
+  expect(options.auth.storage.getItem('burnrate-auth-flow-abcdefgh-code-verifier')).toBe(JSON.stringify('verifier'));
+ });
+ it.each([['?code=x',''],['',cookie],['?error=access_denied&error_description=private',cookie]])('rejects missing or denied callback state %#',async(query,c)=>{
+  const r=await call('/auth/callback'+query,'GET',undefined,{Cookie:c});
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect(exchangeCodeForSession).not.toHaveBeenCalled();
+ });
+ it('rejects expired or mismatched codes without leaking Auth errors',async()=>{
+  exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:400,message:'private'}});
+  const r=await call('/auth/callback?sb_flow_id=abcdefgh&code=used','GET',undefined,{Cookie:cookie});
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect(r.headers.get('set-cookie')).not.toContain('__Host-burnrate-access=access');
+ });
+ it('reports upstream outages safely',async()=>{
+  exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:503}});
+  expect((await call('/auth/callback?sb_flow_id=abcdefgh&code=x','GET',undefined,{Cookie:cookie})).status).toBe(503);
+ });
+ it('rejects wrong origins and callback methods',async()=>{
+  expect((await worker.fetch(new Request('https://evil.test/auth/callback?sb_flow_id=abcdefgh&code=x',{headers:{Cookie:cookie}}),testEnv)).headers.get('location')).toBe('/sign-in?error=invalid_link');
+  expect((await call('/auth/callback','POST',{})).status).toBe(405);
+  expect(exchangeCodeForSession).not.toHaveBeenCalled();
  });
 });

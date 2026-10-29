@@ -20,10 +20,41 @@ function saveSession(headers: Headers, session: { access_token: string; refresh_
 export function clearSession(headers: Headers) {
     for (const name of Object.values(COOKIE)) setCookie(headers, name, '', 0);
 }
-function publicClient(env: Env) {
+const PKCE_COOKIE = '__Host-burnrate-pkce';
+const FLOW_ID = /^[a-zA-Z0-9_-]{8,64}$/;
+function flowCookie(id: string) { return `${PKCE_COOKIE}-${id}`; }
+function publicClient(env: Env, pkce?: { request: Request; headers: Headers }) {
     try {
         if (!env.SUPABASE_URL?.trim() || !env.SUPABASE_PUBLISHABLE_KEY?.trim()) throw new Error();
-        return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+        const storageKey = 'burnrate-auth';
+        const memory = new Map<string, string>();
+        // Persist SDK per-flow slots, never its shared legacy verifier slot.
+        if (pkce) for (const [name, value] of cookies(pkce.request)) {
+            const id = name.slice(PKCE_COOKIE.length + 1);
+            if (!name.startsWith(PKCE_COOKIE + '-') || !FLOW_ID.test(id) || value.length > 2048) continue;
+            try { memory.set(`${storageKey}-flow-${id}-code-verifier`, decodeURIComponent(value)); } catch { /* Invalid verifier cannot authenticate. */ }
+        }
+        const cookieForKey = (key: string) => {
+            const id = key.match(/^burnrate-auth-flow-([a-zA-Z0-9_-]{8,64})-code-verifier$/)?.[1];
+            return id ? flowCookie(id) : null;
+        };
+        return createClient(env.SUPABASE_URL, env.SUPABASE_PUBLISHABLE_KEY, { auth: {
+            persistSession: !!pkce, autoRefreshToken: false, detectSessionInUrl: false,
+            ...(pkce ? { flowType: 'pkce' as const, experimental: { appendPkceFlowIdToRedirects: true }, storageKey, storage: {
+                getItem: (key: string) => memory.get(key) ?? null,
+                setItem: (key: string, value: string) => {
+                    memory.set(key, value);
+                    // Request-specific names prevent out-of-order responses from overwriting other flows.
+                    const name = cookieForKey(key);
+                    if (name) setCookie(pkce.headers, name, encodeURIComponent(value), 600);
+                },
+                removeItem: (key: string) => {
+                    memory.delete(key);
+                    const name = cookieForKey(key);
+                    if (name) setCookie(pkce.headers, name, '', 0);
+                },
+            } } : {}),
+        } });
     } catch {
         // SDK construction errors describe configuration, not a failed Auth request.
         // Never return arbitrary exception text, which could contain credentials.
@@ -67,6 +98,26 @@ export function requireCsrf(request: Request, env: Env) {
         throw new ApiError(403, 'csrf_failed', UIStrings.text.csrfFailed);
     }
 }
+export async function handleAuthCallback(request: Request, env: Env, headers: Headers): Promise<Response> {
+    const fail = () => new Response(null, { status: 303, headers: { Location: '/sign-in?error=invalid_link' } });
+    if (request.method !== 'GET') throw new ApiError(405, 'method_not_allowed', UIStrings.text.requestRejected);
+    const url = new URL(request.url);
+    const code = url.searchParams.get('code');
+    const flowId = url.searchParams.get('sb_flow_id');
+    if (!flowId || !FLOW_ID.test(flowId)) return fail();
+    const verifier = cookies(request).get(flowCookie(flowId));
+    setCookie(headers, flowCookie(flowId), '', 0);
+    if (url.origin !== env.APP_ORIGIN || url.searchParams.has('error') || !code || code.length > 2048 || !verifier || verifier.length > 2048) return fail();
+    await rateLimit(env, 'auth-ip', request.headers.get('CF-Connecting-IP') ?? 'unknown', 20);
+    const client = publicClient(env, { request, headers });
+    // Consume only the verifier belonging to this callback, preserving other pending links.
+    const { data, error } = await client.auth.exchangeCodeForSession(code, { flowId });
+    if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
+    if (error || !data.session) return fail();
+    saveSession(headers, data.session);
+    setCookie(headers, COOKIE.csrf, randomToken('csrf_'), 7 * 86400);
+    return new Response(null, { status: 303, headers: { Location: '/dashboard/token-usage' } });
+}
 export async function handleAuth(request: Request, env: Env, headers: Headers, session: Session | null): Promise<Response> {
     const path = new URL(request.url).pathname;
     if (path === '/api/session' && request.method === 'GET') {
@@ -76,12 +127,16 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
     }
     if (request.method !== 'POST') throw new ApiError(405, 'method_not_allowed', UIStrings.text.usePost);
     requireCsrf(request, env);
-    const client = publicClient(env);
+    const client = publicClient(env, path === '/auth/sign-in' ? { request, headers } : undefined);
     if (path === '/auth/sign-out') {
         const jar = cookies(request);
         let access = jar.get(COOKIE.access);
         let remoteRevoked = false;
         clearSession(headers);
+        // Explicit sign-out cancels pending flows; ordinary stale-session cleanup does not.
+        for (const name of jar.keys()) {
+            if (name === PKCE_COOKIE || (name.startsWith(PKCE_COOKIE + '-') && FLOW_ID.test(name.slice(PKCE_COOKIE.length + 1)))) setCookie(headers, name, '', 0);
+        }
         if (jar.get(COOKIE.refresh)) {
             try {
                 const { data, error } = await client.auth.refreshSession({ refresh_token: jar.get(COOKIE.refresh)! });
@@ -112,7 +167,7 @@ export async function handleAuth(request: Request, env: Env, headers: Headers, s
     const email = body.email.trim().toLowerCase();
     await rateLimit(env, 'auth-email', email, 5, 600);
     if (path === '/auth/sign-in') {
-        const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true } });
+        const { error } = await client.auth.signInWithOtp({ email, options: { shouldCreateUser: true, emailRedirectTo: `${env.APP_ORIGIN}/auth/callback` } });
         if (authUnavailable(error)) throw new ApiError(503, 'auth_unavailable', UIStrings.text.authUnavailable);
         return jsonResponse({ message: UIStrings.text.codeSent });
     }

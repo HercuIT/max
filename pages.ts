@@ -1,8 +1,32 @@
 import { UIStrings } from './ui-strings.ts';
+import { darkLogoSvg } from './brand.ts';
 
 const style = `body{font:16px system-ui;max-width:960px;margin:3rem auto;padding:1rem;background:#171b24;color:#f3f1ee}a{color:#ffb627}input,select,button{font:inherit;padding:.6rem;margin:.3rem;border-radius:5px}label{display:block}section{border:1px solid #555;padding:1rem;margin:1rem 0}table{width:100%;text-align:left}td,th{padding:.5rem}pre{white-space:pre-wrap;overflow-wrap:anywhere}#status{color:#ffb627}[hidden]{display:none!important}`;
-function page(title: string, body: string, script: string) {
-    return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title} — ${UIStrings.text.appName}</title><style>${style}</style></head><body><h1>${title}</h1>${body}<p id="status" role="status"></p><script>${UIStrings.browserScript()}
+const signInStyle = `
+html:has(.sign-in){color-scheme:dark;background:#111318}
+body.sign-in{box-sizing:border-box;max-width:480px;margin:0 auto;min-height:100svh;padding:clamp(24px,8vh,80px) 24px;background:#111318;color:#f3f1ee;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+.sign-in *{box-sizing:border-box}
+.sign-in .brand{margin-bottom:32px}
+.sign-in .logo{display:block;width:288px;max-width:100%;height:auto}
+.sign-in main{padding:28px;background:#171b24;border:1px solid #353b47;border-radius:12px}
+.sign-in h1{font-size:1.5rem;margin:0 0 12px}
+.sign-in p{color:#b7bdc8;line-height:1.6;margin:0 0 24px}
+.sign-in form+form{margin-top:28px;padding-top:24px;border-top:1px solid #353b47}
+.sign-in label{color:#f3f1ee;font-size:.9rem;font-weight:600}
+.sign-in input,.sign-in button{display:block;width:100%;margin:10px 0 0;padding:12px 14px;border-radius:6px;min-height:46px}
+.sign-in input{background:#111318;color:#f3f1ee;border:1px solid #70798a;caret-color:#ffb627}
+.sign-in input::placeholder{color:#aab2c0;opacity:1}
+.sign-in input:autofill{background:#111318;color:#f3f1ee}
+.sign-in input:-webkit-autofill{-webkit-text-fill-color:#f3f1ee;box-shadow:0 0 0 1000px #111318 inset}
+.sign-in button{background:#ff6a1f;color:#111318;border:1px solid #ff6a1f;font-weight:700;cursor:pointer}
+.sign-in button:hover{background:#ffb627;border-color:#ffb627}
+.sign-in input:focus-visible,.sign-in button:focus-visible,.sign-in a:focus-visible{outline:2px solid #ffb627;outline-offset:3px}
+.sign-in #status{color:#ffb627;margin:20px 0 0;overflow-wrap:anywhere}
+.sign-in #status:empty{display:none}
+@media(max-width:380px){.sign-in main{padding:20px}}
+`;
+function page(title: string, body: string, script: string, branded = false) {
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${title} — ${UIStrings.text.appName}</title><link rel="icon" type="image/svg+xml" href="/favicon.svg"><style>${style}${branded ? signInStyle : ''}</style></head><body${branded ? ' class="sign-in"' : ''}>${branded ? `<header class="brand">${darkLogoSvg}</header><main>` : ''}<h1>${title}</h1>${body}<p id="status" role="status"></p>${branded ? '</main>' : ''}<script>${UIStrings.browserScript()}
 ${script}</script></body></html>`;
 }
 const api = `
@@ -23,10 +47,11 @@ export const signInHtml = page(UIStrings.text.signIn, `
 <p>${UIStrings.text.signInInstructions}</p>
 <form id="send"><label>${UIStrings.text.email} <input id="email" type="email" autocomplete="email" required></label><button>${UIStrings.text.sendCode}</button></form>
 <form id="verify"><label>${UIStrings.text.emailCode} <input id="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6,8}"></label><button>${UIStrings.text.signIn}</button></form>`, api + `
+if(new URLSearchParams(window.location.search).get('error')==='invalid_link')statusEl.textContent=UI.invalidSignInLink;
 initializeSession().then(s=>{if(s.signedIn) location.assign('/dashboard/token-usage');}).catch(report);
 document.getElementById('send').onsubmit=async e=>{e.preventDefault();try{statusEl.textContent=(await request('/auth/sign-in','POST',{email:document.getElementById('email').value})).message;}catch(error){report(error);}};
 document.getElementById('verify').onsubmit=async e=>{e.preventDefault();try{await request('/auth/verify','POST',{email:document.getElementById('email').value,code:document.getElementById('code').value});location.assign('/dashboard/token-usage');}catch(error){report(error);}};
-`);
+`, true);
 export const invitationHtml = page(UIStrings.text.acceptOrganizationInvitation, `
 <p>${UIStrings.text.invitationBeforeSignIn} <a href="/sign-in" target="_blank" rel="noopener">${UIStrings.text.signInAnotherTab}</a>${UIStrings.text.invitationAfterSignIn}</p><button id="accept">${UIStrings.text.acceptInvitation}</button><a href="/dashboard/token-usage">${UIStrings.text.dashboard}</a>`, api + `
 const invitation = location.hash.slice(1); history.replaceState(null,'','/invite');
