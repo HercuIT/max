@@ -279,10 +279,12 @@ describe('review regression checks',()=>{
 
 
 describe('PKCE email sign-in',()=>{
- it.each([429,400])('reports rejected resend %s without replacing the pending link verifier',async status=>{
-  const actual=await vi.importActual<typeof import('@supabase/supabase-js')>('@supabase/supabase-js');
-  createClient.mockImplementationOnce(((...args:any[])=>actual.createClient(args[0],args[1],args[2])) as any);
-  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({code:status===429?'over_email_send_rate_limit':'unexpected_failure',msg:'private-provider-details'},{status})));
+ it.each([429,400,503])('reports rejected resend %s without replacing the pending link verifier',async status=>{
+  signInWithOtp.mockImplementationOnce(async()=>{
+   const options=(createClient.mock.calls as unknown as any[][]).find(c=>c[2]?.auth?.flowType==='pkce')?.[2] as any;
+   options.auth.storage.setItem('burnrate-auth-code-verifier',JSON.stringify('replacement-verifier'));
+   return {error:{status,message:'private-provider-details'}};
+  });
   const r=await call('/auth/sign-in','POST',{email:'a@example.test'},{Cookie:'__Host-burnrate-csrf=csrf; __Host-burnrate-pkce='+encodeURIComponent(JSON.stringify('existing-verifier'))});
   expect(r.status).toBe(status);
   expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-pkce=');
