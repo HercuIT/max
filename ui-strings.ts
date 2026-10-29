@@ -117,7 +117,7 @@ export class UIStrings {
         invalidEmail: 'Enter a valid email address.',
         codeSent: 'If this address can receive a sign-in email, it will arrive shortly.',
         enterEmailCode: 'Enter the code from your email.',
-        invalidSignInLink: 'This sign-in link is invalid or expired. Request a new email and open its latest link in the same browser.',
+        invalidSignInLink: 'This sign-in link is invalid or expired. Request a new email and open its link in the same browser.',
         invalidCode: 'The code is invalid or expired. Request another code.',
         notFound: 'Page not found.',
         organizationNotFound: 'Organization not found.',
