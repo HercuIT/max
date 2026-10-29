@@ -279,6 +279,29 @@ describe('review regression checks',()=>{
 
 
 describe('PKCE email sign-in',()=>{
+ it.each([429,400])('reports rejected resend %s without replacing the pending link verifier',async status=>{
+  const actual=await vi.importActual<typeof import('@supabase/supabase-js')>('@supabase/supabase-js');
+  createClient.mockImplementationOnce(((...args:any[])=>actual.createClient(args[0],args[1],args[2])) as any);
+  vi.stubGlobal('fetch',vi.fn().mockResolvedValue(Response.json({code:status===429?'over_email_send_rate_limit':'unexpected_failure',msg:'private-provider-details'},{status})));
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'},{Cookie:'__Host-burnrate-csrf=csrf; __Host-burnrate-pkce='+encodeURIComponent(JSON.stringify('existing-verifier'))});
+  expect(r.status).toBe(status);
+  expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-pkce=');
+  const body:any=await r.json();
+  expect(body.message).toBeUndefined();expect(body.error).not.toContain('private-provider-details');
+  if(status===429)expect(body.code).toBe('auth_email_rate_limited');
+ });
+ it('explains the application email limit without calling Supabase Auth',async()=>{
+  rpc.mockResolvedValueOnce({data:true,error:null}).mockResolvedValueOnce({data:false,error:null});
+  const r=await call('/auth/sign-in','POST',{email:'a@example.test'});
+  expect(r.status).toBe(429);expect(await r.json()).toMatchObject({code:'auth_email_rate_limited',error:expect.stringContaining('ten minutes')});
+  expect(r.headers.get('retry-after')).toBe('600');
+  expect(signInWithOtp).not.toHaveBeenCalled();
+ });
+ it('preserves the latest pending verifier when an expired email returns an error',async()=>{
+  const r=await call('/auth/callback?error=access_denied&error_code=otp_expired','GET',undefined,{Cookie:'__Host-burnrate-pkce=latest-verifier'});
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');
+  expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-pkce=');
+ });
  it('uses the real SDK to generate a PKCE challenge and verifier cookie',async()=>{
   const actual=await vi.importActual<typeof import('@supabase/supabase-js')>('@supabase/supabase-js');
   createClient.mockImplementationOnce(((...args:any[])=>actual.createClient(args[0],args[1],args[2])) as any);
@@ -341,7 +364,7 @@ describe('PKCE email sign-in',()=>{
  it('rejects expired or mismatched codes without leaking Auth errors',async()=>{
   exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:400,message:'private'}});
   const r=await call('/auth/callback?code=used','GET',undefined,{Cookie:cookie});
-  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect(r.headers.get('set-cookie')).not.toContain('__Host-burnrate-access=access');
+  expect(r.headers.get('location')).toBe('/sign-in?error=invalid_link');expect(r.headers.get('set-cookie')??'').not.toContain('__Host-burnrate-access=access');
  });
  it('reports upstream outages safely',async()=>{
   exchangeCodeForSession.mockResolvedValue({data:{session:null},error:{status:503}});

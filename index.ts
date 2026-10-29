@@ -84,7 +84,7 @@ export default {
             // Deliberately log safe categories only: DB/Auth errors can contain credentials or payload values.
             console.error(JSON.stringify({ context: 'request', requestId, code: failure.code, status: failure.status }));
             response = jsonResponse({ error: failure.message, code: failure.code, requestId }, failure.status);
-            if (failure.status === 429 || failure.status === 503) response.headers.set('Retry-After', '60');
+            if (failure.status === 429 || failure.status === 503) response.headers.set('Retry-After', failure.code === 'auth_email_rate_limited' ? '600' : '60');
         }
         for (const [name, value] of headers) if (name !== 'set-cookie' && !(name === 'cache-control' && response.headers.has(name))) response.headers.set(name, value);
         for (const value of headers.getSetCookie()) response.headers.append('Set-Cookie', value);

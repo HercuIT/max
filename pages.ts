@@ -20,6 +20,7 @@ body.sign-in{box-sizing:border-box;max-width:480px;margin:0 auto;min-height:100s
 .sign-in input:-webkit-autofill{-webkit-text-fill-color:#f3f1ee;box-shadow:0 0 0 1000px #111318 inset}
 .sign-in button{background:#ff6a1f;color:#111318;border:1px solid #ff6a1f;font-weight:700;cursor:pointer}
 .sign-in button:hover{background:#ffb627;border-color:#ffb627}
+.sign-in button:disabled{opacity:.55;cursor:wait}
 .sign-in input:focus-visible,.sign-in button:focus-visible,.sign-in a:focus-visible{outline:2px solid #ffb627;outline-offset:3px}
 .sign-in #status{color:#ffb627;margin:20px 0 0;overflow-wrap:anywhere}
 .sign-in #status:empty{display:none}
@@ -45,12 +46,10 @@ function rememberedTenant() { try { return localStorage.getItem('burnrate-tenant
 `;
 export const signInHtml = page(UIStrings.text.signIn, `
 <p>${UIStrings.text.signInInstructions}</p>
-<form id="send"><label>${UIStrings.text.email} <input id="email" type="email" autocomplete="email" required></label><button>${UIStrings.text.sendCode}</button></form>
-<form id="verify"><label>${UIStrings.text.emailCode} <input id="code" inputmode="numeric" autocomplete="one-time-code" required pattern="[0-9]{6,8}"></label><button>${UIStrings.text.signIn}</button></form>`, api + `
+<form id="send"><label>${UIStrings.text.email} <input id="email" type="email" autocomplete="email" required></label><button id="send-email">${UIStrings.text.sendCode}</button></form>`, api + `
 if(new URLSearchParams(window.location.search).get('error')==='invalid_link')statusEl.textContent=UI.invalidSignInLink;
 initializeSession().then(s=>{if(s.signedIn) location.assign('/dashboard/token-usage');}).catch(report);
-document.getElementById('send').onsubmit=async e=>{e.preventDefault();try{statusEl.textContent=(await request('/auth/sign-in','POST',{email:document.getElementById('email').value})).message;}catch(error){report(error);}};
-document.getElementById('verify').onsubmit=async e=>{e.preventDefault();try{await request('/auth/verify','POST',{email:document.getElementById('email').value,code:document.getElementById('code').value});location.assign('/dashboard/token-usage');}catch(error){report(error);}};
+document.getElementById('send').onsubmit=async e=>{e.preventDefault();const button=document.getElementById('send-email');if(button.disabled)return;button.disabled=true;try{statusEl.textContent=(await request('/auth/sign-in','POST',{email:document.getElementById('email').value})).message+' '+UI.signInEmailCooldown;setTimeout(()=>{button.disabled=false;},60000);}catch(error){button.disabled=false;report(error);}};
 `, true);
 export const invitationHtml = page(UIStrings.text.acceptOrganizationInvitation, `
 <p>${UIStrings.text.invitationBeforeSignIn} <a href="/sign-in" target="_blank" rel="noopener">${UIStrings.text.signInAnotherTab}</a>${UIStrings.text.invitationAfterSignIn}</p><button id="accept">${UIStrings.text.acceptInvitation}</button><a href="/dashboard/token-usage">${UIStrings.text.dashboard}</a>`, api + `
