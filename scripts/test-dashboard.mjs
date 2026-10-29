@@ -94,7 +94,7 @@ for(const denyStorage of [false,true]) {
  if(!denyStorage)assert.equal(dom.window.localStorage.getItem('burnrate-tenant'),A);
  assert.deepEqual(redirects,['/dashboard/token-usage']);assert.equal(dom.window.document.getElementById('status').textContent,'');dom.window.close();
 }
-// Exercise sign-in startup for both an existing session and the email-code flow.
+// Exercise sign-in startup and link resend recovery.
 {
  const requests=[];
  const {dom,redirects}=pageFixture(signInHtml,'/sign-in',async url=>{requests.push(url);return response({signedIn:true,csrf:'c'});});
@@ -106,11 +106,25 @@ for(const denyStorage of [false,true]) {
  await settle();assert.equal(requests[0].url,'/api/session');assert.equal(dom.window.document.querySelector('h1').textContent,UIStrings.text.signIn);
  dom.window.document.getElementById('email').value='member@example.test';
  await dom.window.document.getElementById('send').onsubmit(new dom.window.Event('submit',{cancelable:true}));
- assert.equal(dom.window.document.getElementById('status').textContent,UIStrings.text.codeSent);
- dom.window.document.getElementById('code').value='123456';
- await dom.window.document.getElementById('verify').onsubmit(new dom.window.Event('submit',{cancelable:true}));
- const verified=requests.find(r=>r.url==='/auth/verify');assert.equal(verified.options.method,'POST');assert.deepEqual(JSON.parse(verified.options.body),{email:'member@example.test',code:'123456'});
- assert.equal(verified.options.headers['X-CSRF-Token'],'signin-csrf');assert.deepEqual(redirects,['/dashboard/token-usage']);dom.window.close();
+ assert.equal(dom.window.document.getElementById('status').textContent,UIStrings.text.codeSent+' '+UIStrings.text.signInEmailCooldown);
+ assert.equal(dom.window.document.getElementById('code'),null);assert.equal(dom.window.document.getElementById('verify'),null);
+ assert.equal(dom.window.document.getElementById('send-email').disabled,true);
+ await dom.window.document.getElementById('send').onsubmit(new dom.window.Event('submit',{cancelable:true}));
+ const sent=requests.filter(r=>r.url==='/auth/sign-in');assert.equal(sent.length,1);
+ assert.equal(sent[0].options.headers['X-CSRF-Token'],'signin-csrf');assert.deepEqual(redirects,[]);dom.window.close();
+}
+{
+ let release;let attempts=0;let cooldown;
+ const {dom}=pageFixture(signInHtml,'/sign-in',async url=>url==='/api/session'?response({signedIn:false,csrf:'c'}):(attempts++,new Promise(resolve=>{release=resolve;})));
+ await settle();dom.window.document.getElementById('email').value='member@example.test';
+ dom.window.setTimeout=(callback,delay)=>{assert.equal(delay,60000);cooldown=callback;return 1;};
+ const form=dom.window.document.getElementById('send');const button=dom.window.document.getElementById('send-email');
+ const first=form.onsubmit(new dom.window.Event('submit'));assert.equal(button.disabled,true);
+ await form.onsubmit(new dom.window.Event('submit'));assert.equal(attempts,1);
+ release({ok:false,status:429,json:async()=>({error:UIStrings.text.authEmailRateLimited})});await first;
+ assert.equal(button.disabled,false);assert.equal(dom.window.document.getElementById('status').textContent,UIStrings.text.authEmailRateLimited);
+ const retry=form.onsubmit(new dom.window.Event('submit'));release(response({message:UIStrings.text.codeSent}));await retry;
+ assert.equal(button.disabled,true);cooldown();assert.equal(button.disabled,false);assert.equal(attempts,2);dom.window.close();
 }
 console.log('PASS: tenant switch clears data and project state, stale responses cannot render, source selections persist, role-based settings and invitation landing script');
 
