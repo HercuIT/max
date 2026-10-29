@@ -302,9 +302,9 @@ describe('PKCE email sign-in',()=>{
   }));
   try{
    const first=call('/auth/sign-in','POST',{email:'first@example.test'},{Cookie:'__Host-burnrate-csrf=csrf'});
-   while(pending.length<1)await new Promise(resolve=>setTimeout(resolve,1));
+   await vi.waitFor(() => expect(pending.length).toBe(1));
    const second=call('/auth/sign-in','POST',{email:'second@example.test'},{Cookie:'__Host-burnrate-csrf=csrf'});
-   while(pending.length<2)await new Promise(resolve=>setTimeout(resolve,1));
+   await vi.waitFor(() => expect(pending.length).toBe(2));
    pending[1].resolve(Response.json({}));const newer=await second;
    pending[0].resolve(Response.json({}));const older=await first;
    const jar=new Map<string,string>();
