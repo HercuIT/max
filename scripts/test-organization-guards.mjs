@@ -58,7 +58,24 @@ try{
  const maintenance=new PGlite();
  const maintenanceDb={query:async(sql,params)=>params?maintenance.query(sql,params):(await maintenance.exec(sql)).at(-1)};
  try{
-  await setupFixture(sql=>maintenanceDb.query(sql),{pglite:true,applyMigration:(name,sql)=>name.startsWith('20261028210000')?stageTenancy(maintenanceDb):maintenanceDb.query(sql)});
+  await setupFixture(sql=>maintenanceDb.query(sql),{pglite:true,applyMigration:async(name,sql)=>{
+   if(!name.startsWith('20261028210000'))return maintenanceDb.query(sql);
+   await stageTenancy(maintenanceDb);
+   // Verify privacy before the later provenance/privacy migrations execute.
+   for(const column of ['host_name','user_email']){
+    assert.equal((await maintenanceDb.query("select has_column_privilege('authenticated','public.token_usage_logs',$1,'SELECT') as allowed",[column])).rows[0].allowed,false);
+   }
+   for(const grant of [
+    'grant select on public.token_usage_logs to authenticated',
+    'grant select(host_name) on public.token_usage_logs to authenticated',
+    'grant select(user_email) on public.token_usage_logs to authenticated',
+   ]){
+    await maintenanceDb.query('begin');
+    try{await maintenanceDb.query(grant);await assert.rejects(stageTenancy(maintenanceDb),/Final schema verification failed/);}
+    finally{await maintenanceDb.query('rollback');}
+    await stageTenancy(maintenanceDb);
+   }
+  }});
   await stageTenancy(maintenanceDb); // Column-limited safe grants are sufficient.
   await maintenanceDb.query('begin');
   await maintenanceDb.query('revoke select(input_tokens) on public.token_usage_logs from authenticated');

@@ -16,6 +16,20 @@ try{
   assert(interrupted);
   assert.equal((await db.query('select count(*)::int as n from public.token_usage_logs where tenant_id is not null and project_id is not null')).rows[0].n,1);
   await stageTenancy(db,{batchSize:1});
+  // Privacy must hold at cutover, not only after the appended privacy migration.
+  for(const column of ['host_name','user_email']){
+   assert.equal((await db.query("select has_column_privilege('authenticated','public.token_usage_logs',$1,'SELECT') as allowed",[column])).rows[0].allowed,false);
+  }
+  for(const grant of [
+   'grant select on public.token_usage_logs to authenticated',
+   'grant select(host_name) on public.token_usage_logs to authenticated',
+   'grant select(user_email) on public.token_usage_logs to authenticated',
+  ]){
+   await db.query('begin');
+   try{await db.query(grant);await assert.rejects(stageTenancy(db,{batchSize:1}),/Final schema verification failed/);}
+   finally{await db.query('rollback');}
+   await stageTenancy(db,{batchSize:1});
+  }
  }});
  await stageTenancy(db,{batchSize:1}); // A completed rollout is also safely repeatable.
  assert.equal((await db.query('select phase from private.tenancy_rollout_state')).rows[0].phase,5);
