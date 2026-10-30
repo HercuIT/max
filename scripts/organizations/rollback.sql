@@ -1,5 +1,6 @@
 -- Tenant-safe compensations. Operator chooses statements for the failed stage;
 -- this file is NOT an automatic "down" script and must not be executed wholesale.
+do $$ begin raise exception 'Selective rollback reference: copy only reviewed statements for the failed stage.'; end $$;
 -- 001/002: retain expansion, manifests and completed assignments; stop the runner.
 -- Restore erroneous assignments only by reviewed manifest-listed UUIDs with a
 -- comparison against current links; never clear/reassign later customer writes.

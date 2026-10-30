@@ -1,5 +1,8 @@
 -- Expansion only: old usage/model values are never rewritten. Bounded backfill
 -- and NOT NULL finalization are separate operator stages; see organizations-online.md.
+-- Fail fast rather than invert locks against a concurrent tenant purge.
+set local lock_timeout='5s';
+lock table public.token_usage_logs,private.tenant_deletion_jobs in access exclusive mode nowait;
 alter table public.token_usage_logs add column if not exists model_provenance text;
 
 create or replace function private.model_provenance(p_source text,p_model text)
