@@ -6,7 +6,7 @@ import {tokenUsageDashboardHtml} from '../dashboard.ts';
 import {signInHtml,settingsHtml,invitationHtml} from '../pages.ts';
 const A='10000000-0000-4000-8000-000000000001',B='10000000-0000-4000-8000-000000000002';
 const settle=()=>new Promise(resolve=>setTimeout(resolve,30));
-const calls=[];let pendingA;let delayA=false;
+const calls=[];let pendingA=[];let delayA=false;
 const dashboard=new JSDOM(tokenUsageDashboardHtml,{url:'https://app.test/dashboard/token-usage',runScripts:'dangerously',beforeParse(w){
  w.localStorage.setItem('burnrate-tenant',A);w.Chart=class{constructor(_canvas,config){this.config=config;}destroy(){}};
  w.fetch=async(path)=>{
@@ -16,7 +16,7 @@ const dashboard=new JSDOM(tokenUsageDashboardHtml,{url:'https://app.test/dashboa
   const isA=url.pathname.includes(A);const source=url.searchParams.get('source');
   let data=url.pathname.endsWith('/projects')?{projects:source==='codex'?['beta']:['alpha','beta']}:
    url.pathname.endsWith('/series')?{series:[]}:{rows:[{project_name:isA?'A-private':'B-private',total_tokens:1,input_tokens:1,output_tokens:0,cache_read_tokens:0,cache_write_tokens:0,total_cost_usd:1,cost_per_1k_tokens:1,sessions:1,last_active:null}]};
-  if(delayA&&isA&&url.pathname.endsWith('/table'))await new Promise(resolve=>{pendingA=resolve;});
+  if(delayA&&isA&&url.pathname.endsWith('/table'))await new Promise(resolve=>{pendingA.push(resolve);});
   return {ok:true,status:200,json:async()=>data};
  }
 }});
@@ -26,11 +26,11 @@ const projects=doc.getElementById('projects');projects.options[0].selected=true;
 const source=doc.getElementById('source');source.value='codex';source.dispatchEvent(new dashboard.window.Event('change'));await settle();
 assert(calls.slice(-3).filter(x=>!x.includes('/projects')).every(x=>new URL(x,'https://app.test').searchParams.get('projects')==='alpha'));
 assert([...projects.options].some(o=>o.value==='alpha'&&o.selected));
-delayA=true;doc.getElementById('apply').click();await settle();assert(pendingA);
+delayA=true;doc.getElementById('apply').click();await settle();assert(pendingA.length);
 const tenants=doc.getElementById('tenant');tenants.value=B;tenants.dispatchEvent(new dashboard.window.Event('change'));
 assert.equal(doc.querySelector('#table tbody').textContent,'');assert.equal(projects.options.length,0);
 await settle();assert(doc.querySelector('#table tbody').textContent.includes('B-private'));
-pendingA();await settle();assert(!doc.querySelector('#table tbody').textContent.includes('A-private'));
+pendingA.forEach(resolve=>resolve());await settle();assert(!doc.querySelector('#table tbody').textContent.includes('A-private'));
 assert(!calls.slice(-3).filter(x=>!x.includes('/projects')).some(x=>new URL(x,'https://app.test').searchParams.has('projects')));
 assert.equal(source.value,'codex');
 doc.querySelector('[data-tab="cost"]').click();await settle();assert.equal(source.value,'');
@@ -141,6 +141,7 @@ for (const filename of ['dashboard.ts', 'pages.ts']) {
  for (const [, key] of source.matchAll(/\bUI\.(\w+)/g)) assert(Object.hasOwn(UIStrings.text, key), filename + ': unknown UI string ' + key);
 }
 console.log('PASS: shared browser copy, interpolation parity, script-safe serialization and valid catalog references');
+await import('./test-dashboard-brand.mjs');
 
 // Callback errors use fixed UI copy rather than displaying provider query text.
 {
