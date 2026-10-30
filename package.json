@@ -10,7 +10,10 @@
     "test:dashboard": "node scripts/test-dashboard.mjs",
     "test:postgres": "node scripts/test-postgres.mjs",
     "test:auth-live": "node scripts/test-auth-live.mjs",
-    "test:staged": "node scripts/test-staged-tenancy.mjs"
+    "test:staged": "node scripts/test-staged-tenancy.mjs",
+    "test:online": "node scripts/test-online-tenancy.mjs",
+    "test:online:postgres": "node scripts/test-online-tenancy.mjs --postgres",
+    "test:organizations": "node scripts/test-organization-operations.mjs"
   },
   "keywords": [],
   "author": "",

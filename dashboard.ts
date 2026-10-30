@@ -594,6 +594,7 @@ main>select {
   <main><h1>${UIStrings.text.tokenUsage}</h1><p class="subtitle">${UIStrings.text.dashboardSubtitle}</p>
 
   <div class="workspace-bar"><div class="field"><label for="tenant">${UIStrings.text.organization}</label><select id="tenant"></select></div><nav><a href="/settings">${UIStrings.text.organizationSettings}</a> <button id="signout" type="button">${UIStrings.text.signOut}</button></nav></div>
+  <p class="muted" id="modelCoverage">${UIStrings.text.modelCoverage}</p>
   <div class="tabs" role="group" aria-label="${UIStrings.text.dashboard}">
     <button class="tab active" data-tab="tokens" aria-pressed="true">${UIStrings.text.tokenUsage}</button>
     <button class="tab" data-tab="cost" aria-pressed="false">${UIStrings.text.costUsd}</button>
