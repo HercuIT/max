@@ -7,6 +7,7 @@ const { insert, rpc, getUser, refreshSession, signInWithOtp, verifyOtp, signOut,
 });
 vi.mock('@supabase/supabase-js',()=>({createClient}));
 import worker, {parseCodexLogs, type Env} from './index';
+import {faviconAssets} from './assets';
 import {digest, randomToken, readJson, databaseError, uuid, ApiError} from './http';
 import {dashboardArguments} from './tenancy';
 import {sessionFor} from './auth';
@@ -148,7 +149,13 @@ describe('tenant HTTP boundary',()=>{
  it.each(['/sign-in','/invite','/dashboard/token-usage','/settings'])('serves safe HTML for %s',async path=>{
   signedIn();const r=await call(path);expect(r.status).toBe(200);expect(r.headers.get('cache-control')).toBe('no-store');expect(await r.text()).toContain('<!doctype html>');
  });
- it.each(['/favicon.svg','/favicon-32.png'])('serves public asset %s',async path=>{expect((await call(path)).status).toBe(200);expect(getUser).not.toHaveBeenCalled();});
+ it.each(['/favicon.ico','/favicon.svg','/apple-touch-icon.png','/favicon-32.png'])('serves original public brand asset %s without authentication',async path=>{
+  const r=await call(path);const asset=faviconAssets[path];
+  expect(r.status).toBe(200);expect(r.headers.get('content-type')).toBe(asset.contentType);
+  expect(r.headers.get('cache-control')).toBe('public, max-age=86400');
+  expect(new Uint8Array(await r.arrayBuffer())).toEqual(Uint8Array.from(atob(asset.base64),c=>c.charCodeAt(0)));
+  expect(getUser).not.toHaveBeenCalled();
+ });
  it('returns 404 for unknown page',async()=>{expect((await call('/missing')).status).toBe(404);});
  it('loads memberships and safe member display data',async()=>{signedIn();expect((await call('/api/tenants')).status).toBe(200);expect((await call(`/api/tenants/${tenant}/members`)).status).toBe(200);});
  for(const path of ['token-usage/projects','token-usage/table','token-usage/series','cost/table','cost/series']){
