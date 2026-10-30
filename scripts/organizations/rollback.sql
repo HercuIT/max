@@ -1,0 +1,15 @@
+-- Inert compensation reference: there is no executable SQL in this file. An
+-- accidental psql invocation cannot continue past an error and weaken ownership.
+-- 001/002: stop the runner; retain expansion/manifests and accepted measurements.
+-- Restore assignments only for reviewed manifest-listed UUIDs after comparing
+-- current links; never reassign later customer writes.
+-- 003: execute reviewed rollback-003.sql, which requires phase=3, takes the
+-- rollout lock, bounds table locking to five seconds, drops NOT NULL/proof
+-- checks atomically, and resets progress to phase=2 for safe forward resumption.
+-- 004/005: review dependent constraints before removing newly built indexes
+-- CONCURRENTLY. Never weaken constraints while another tenant can be admitted.
+-- 006/007: deploy compatibility.ts, retaining RLS/scoped RPCs; never restore
+-- global authorization or global project uniqueness after multi-org admission.
+-- 008: keep tenant keys working; never automatically un-revoke a legacy key.
+-- Model/deletion: retain added fields/view/functions dormant; never restore the
+-- old purge operation which bypasses the recovery window.

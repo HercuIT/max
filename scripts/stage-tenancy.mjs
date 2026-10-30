@@ -18,7 +18,15 @@ export function tenancyPhases() {
    alter table public.token_usage_logs add column tenant_id uuid, add column project_id uuid;
    alter table public.token_usage_logs add constraint token_usage_logs_tenant_id_fkey foreign key(tenant_id) references public.tenants(id) on delete cascade not valid;
   `+between('create table private.ingestion_keys (','create function private.tenant_role('),
-  cutover:`alter table public.projects drop constraint projects_name_key;\ndrop view public.project_spend_summary;\n`+sql.slice(sql.indexOf('create function private.tenant_role(')),
+  cutover:`alter table public.projects drop constraint projects_name_key;\ndrop view public.project_spend_summary;\n`+sql.slice(sql.indexOf('create function private.tenant_role('))+`
+   -- Tighten the historical table-wide grant in this same cutover transaction,
+   -- before later provenance/privacy migrations can run. Do not rewrite history.
+   revoke select on public.token_usage_logs from public,anon,authenticated;
+   revoke select(host_name,user_email) on public.token_usage_logs from public,anon,authenticated;
+   grant select(id,tenant_id,project_id,project_name,source,session_id,model,
+    input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_cost_usd,recorded_at)
+    on public.token_usage_logs to authenticated;
+  `,
  };
 }
 
@@ -104,7 +112,11 @@ export async function stageTenancy(db,{batchSize=5000,statementTimeoutMs=60000,o
    (select count(*)=3 from information_schema.columns where table_schema='public' and ((table_name='projects' and column_name='tenant_id') or (table_name='token_usage_logs' and column_name in ('tenant_id','project_id'))) and is_nullable='NO')
    and (select count(*)=3 and bool_and(convalidated) from pg_constraint where conname in ('projects_tenant_id_fkey','token_usage_logs_tenant_id_fkey','usage_tenant_project_fk'))
    and not has_table_privilege('anon','public.token_usage_logs','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
-   and has_table_privilege('authenticated','public.token_usage_logs','SELECT')
+   and (select bool_and(has_column_privilege('authenticated','public.token_usage_logs',required_column,'SELECT'))
+    from unnest(array['tenant_id','project_id','project_name','source','recorded_at','session_id',
+     'input_tokens','output_tokens','cache_read_tokens','cache_write_tokens','total_cost_usd']) as required_columns(required_column))
+   and not has_column_privilege('authenticated','public.token_usage_logs','host_name','SELECT')
+   and not has_column_privilege('authenticated','public.token_usage_logs','user_email','SELECT')
    and not has_table_privilege('authenticated','public.token_usage_logs','INSERT,UPDATE,DELETE,TRUNCATE')
    and (select count(*)=5 and bool_and(indisvalid) from pg_index where indexrelid in (to_regclass('public.projects_tenant_name_key'),to_regclass('public.projects_tenant_id_key'),to_regclass('public.usage_tenant_time'),to_regclass('public.usage_tenant_source_time'),to_regclass('public.usage_tenant_project_time')))
    and (select count(*)=5 and bool_and(p.proargtypes[0]='uuid'::regtype and not has_function_privilege('anon',p.oid,'EXECUTE') and has_function_privilege('authenticated',p.oid,'EXECUTE')) from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in ('get_token_usage_projects','get_token_usage_series','get_token_usage_table','get_cost_table','get_cost_series'))

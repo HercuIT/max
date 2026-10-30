@@ -4,6 +4,8 @@ Status: implementation contract. Local implementation and tests are included; pr
 
 Companion documents: [Supabase architecture](supabase-tenancy.md) and [rollout and acceptance tests](multi-tenant-rollout.md).
 
+The implemented [organizations and existing data design](organizations-and-data-migration.md) adds online ingest compatibility, honest historical model provenance, full operator-assisted export and a seven-day deletion recovery window. Production operations still require their release gates. See its [implementation runbook](../docs/organizations-online.md); the maintenance-only cutover remains an alternative, not a continuous-ingestion procedure.
+
 ## Goal and terminology
 
 Allow independent organizations to use HercuIT Burnrate without seeing or modifying one another's telemetry. A **tenant** is an organization/workspace; a Supabase Auth **user** can belong to several tenants. A **project** belongs to exactly one tenant. Claude and Codex are telemetry sources within a tenant, not separate tenants.

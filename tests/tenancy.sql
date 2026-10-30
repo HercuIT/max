@@ -121,6 +121,10 @@ select pg_temp.check_true((select count(*)=0 from public.token_usage_logs),'dele
 reset role;
 set local role service_role;
 select pg_temp.denied($q$select public.ingest_telemetry(repeat('b',64),'[]')$q$,'PT401');
+select pg_temp.denied($q$select public.purge_tenant(current_setting('test.b')::uuid)$q$,'PT409');
+reset role;
+update private.tenant_deletion_jobs set purge_after=now()-interval '1 second' where tenant_id=current_setting('test.b')::uuid;
+set local role service_role;
 select public.purge_tenant(current_setting('test.b')::uuid);
 select public.purge_tenant(current_setting('test.b')::uuid);
 reset role;

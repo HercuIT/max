@@ -1,5 +1,7 @@
 # Tenant operations and cutover
 
+For continuous ingestion, use [the online rollout](organizations-online.md). The pause-writers procedure below is an intentional maintenance alternative, not the online design. Already upgraded deployments apply only appended changes and bounded model-provenance backfill; never replay historical ownership.
+
 This is a breaking, fail-closed authorization cutover. Preparing code/tests does not run these production steps. Use an operator-controlled maintenance window. Keep all credentials out of shell tracing, source, logs, and shared reports.
 
 ## Before migration
@@ -25,7 +27,7 @@ Set `TENANCY_DATABASE_URL` in the operator's secure environment before running. 
 2. Assign historical projects and resolve/create projects for usage in bounded batches (default 5,000 rows, maximum 10,000). Each batch commits independently. A private checksum/progress record permits restart after interruption without reassigning completed rows. Keep legacy writers paused throughout; project-name uniqueness stays global until cutover.
 3. Build the two unique tenant/project indexes and three usage indexes with `CREATE INDEX CONCURRENTLY`, outside transaction blocks. Interrupted invalid indexes are removed concurrently before a retry.
 4. Attach the prebuilt unique indexes, add not-null checks and the composite foreign key as `NOT VALID`, and validate each constraint in its own transaction. Validated checks let the later `SET NOT NULL` use a brief catalog lock rather than another full table scan. Every statement has an explicit timeout and every table-lock acquisition has a five-second timeout; adjust the statement timeout only after measuring the failed phase.
-5. Commit the short RLS/grant/RPC cutover, remove old aggregate signatures/global uniqueness, and verify required columns, all foreign keys, RLS, index validity and API grants. The script prints safe phase/count progress, never connection values, and does **not** modify Supabase's migration ledger.
+5. Commit the short RLS/grant/RPC cutover, remove old aggregate signatures/global uniqueness, and restrict authenticated usage reads to safe columns in the same transaction. Final verification requires every dashboard input column and denies `host_name`/`user_email` reads before any later privacy migration runs. If rechecking an older completed stage fails these checks, stop and reconcile its grants; do not repair the ledger or replay the destructive cutover to bypass verification. The script prints safe phase/count progress, never connection values, and does **not** modify Supabase's migration ledger.
 
 After independently comparing historical counts/per-source/project sums against the backup and reviewing the final verification, explicitly record the already-executed equivalent migration:
 
@@ -68,7 +70,7 @@ Invitations expire after seven days. Acceptance checks the current verified Auth
 
 ## Deletion, retention and recovery
 
-An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. A trusted operator processes pending jobs with:
+An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. The appended recovery migration blocks purge until `purge_after` (seven days); during that window an operator can call `public.cancel_tenant_deletion(tenant_uuid, verified_owner_uuid)` with the deleting organization's UUID and its independently verified owner's Auth UUID. This RPC is executable only by `service_role` and the database owner; cancellation does not revive revoked credentials. Prepare the organization export before requesting deletion. A trusted operator processes eligible pending jobs with:
 
 ```sql
 select public.purge_tenant('00000000-0000-4000-8000-000000000000'::uuid);

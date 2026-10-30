@@ -7,6 +7,7 @@ const { insert, rpc, getUser, refreshSession, signInWithOtp, verifyOtp, signOut,
 });
 vi.mock('@supabase/supabase-js',()=>({createClient}));
 import worker, {parseCodexLogs, type Env} from './index';
+import compatibility from './compatibility';
 import {faviconAssets} from './assets';
 import {digest, randomToken, readJson, databaseError, uuid, ApiError} from './http';
 import {dashboardArguments} from './tenancy';
@@ -24,7 +25,7 @@ beforeEach(()=>{
  signInWithOtp.mockResolvedValue({error:null}); verifyOtp.mockResolvedValue({data:{session:{access_token:'access',refresh_token:'refresh',expires_in:3600}},error:null}); signOut.mockResolvedValue({error:null});
  rpc.mockImplementation(async(name:string,args:any)=>{
   if(name==='check_rate_limit')return {data:true,error:null};
-  if(name==='ingest_telemetry'){if(args.p_rows.length)await insert(args.p_rows);return {data:{count:args.p_rows.length,tenant_id:tenant,key_id:other},error:null};}
+  if(name==='ingest_telemetry'||name==='ingest_legacy_telemetry'){if(args.p_rows.length)await insert(args.p_rows);return {data:{count:args.p_rows.length,tenant_id:tenant,key_id:other},error:null};}
   if(name==='list_tenants')return {data:[{id:tenant,name:'A',role:'owner'}],error:null};
   if(name==='manage_tenant')return {data:{id:other,email:'invite@example.test'},error:null};
   if(name==='accept_tenant_invitation')return {data:tenant,error:null};
@@ -219,6 +220,44 @@ describe('bounded, tenant-key ingestion',()=>{
  it('rejects more than 5000 normalized rows',async()=>{
   const records=Array.from({length:5001},()=>({asInt:'1',attributes:[{key:'type',value:{stringValue:'input'}}]}));
   expect((await call('/v1/metrics','POST',{resourceMetrics:[{scopeMetrics:[{metrics:[{name:'claude_code.token.usage',sum:{dataPoints:records}}]}]}]},bearer)).status).toBe(413);
+ });
+});
+
+describe('organization online compatibility boundary',()=>{
+ const request=(path:string,key?:string)=>new Request('https://x'+path,{method:'POST',headers:{'Content-Type':'application/json',...(key?{Authorization:'Bearer '+key}:{})},body:'{}'});
+ it.each(['/v1/metrics','/v1/logs'])('hashes a legacy bearer only in the explicit compatibility build: %s',async path=>{
+  const r=await compatibility.fetch(request(path,'old-shared-key'),testEnv);
+  expect(r.status).toBe(200);
+  expect(rpc).toHaveBeenCalledWith('ingest_legacy_telemetry',{p_token_hash:await digest('old-shared-key'),p_rows:[]});
+  expect(await r.text()).not.toContain(tenant);
+  expect((await worker.fetch(request(path,'old-shared-key'),testEnv)).status).toBe(401);
+ });
+ it('uses normal key validation for tenant keys in the compatibility build',async()=>{
+  expect((await compatibility.fetch(request('/v1/metrics','brk_'+'a'.repeat(64)),testEnv)).status).toBe(200);
+  expect(rpc).toHaveBeenCalledWith('ingest_telemetry',expect.anything());
+  expect(rpc).not.toHaveBeenCalledWith('ingest_legacy_telemetry',expect.anything());
+ });
+ it.each([undefined,'x'.repeat(513)])('rejects missing or unbounded legacy bearers',async key=>{
+  expect((await compatibility.fetch(request('/v1/metrics',key),testEnv)).status).toBe(401);
+  expect(rpc).not.toHaveBeenCalledWith('ingest_legacy_telemetry',expect.anything());
+ });
+ it('fails closed when the bridge is unavailable, revoked or expired, even for an empty batch',async()=>{
+  rpc.mockImplementation(async(name:string)=>name==='check_rate_limit'?{data:true,error:null}:{data:null,error:{code:'PT401',message:'Unauthorized'}});
+  const r=await compatibility.fetch(request('/v1/metrics','old-shared-key'),testEnv);
+  expect(r.status).toBe(401);expect(r.headers.get('cache-control')).toBe('no-store');
+ });
+ it.each(['token-usage/projects','token-usage/table','token-usage/series','cost/table','cost/series'])('uses separate scoped coexistence RPCs for %s',async path=>{
+  signedIn();
+  const r=await compatibility.fetch(new Request('https://x/api/tenants/'+tenant+'/'+path,{headers:{Cookie:authCookie}}),testEnv);
+  expect(r.status).toBe(200);
+  expect(rpc).toHaveBeenCalledWith('organization_get_'+path.replaceAll('-','_').replace('/','_'),expect.objectContaining({p_tenant_id:tenant}));
+  const denied=await call('/api/tenants/'+other+'/'+path);
+  expect(denied.status).toBe(404);
+  expect(await denied.text()).not.toContain(other);
+ });
+ it('does not accept Basic Auth in the compatibility build',async()=>{
+  const r=await compatibility.fetch(new Request('https://x/api/tenants',{headers:{Authorization:'Basic dXNlcjpwYXNz'}}),testEnv);
+  expect(r.status).toBe(401);
  });
 });
 

@@ -38,7 +38,7 @@ async function deliverInvitation(env: Env, email: string, token: string): Promis
         return response.ok;
     } catch { return false; } // Caller reports the persisted invitation and actionable delivery failure.
 }
-export async function handleTenantApi(request: Request, env: Env, session: Session, requestId: string): Promise<Response> {
+export async function handleTenantApi(request: Request, env: Env, session: Session, requestId: string, rolloutReads = false): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === '/api/tenants' && request.method === 'GET') return jsonResponse({ tenants: await rpc(session, 'list_tenants') ?? [] });
     if (url.pathname === '/api/invitations/accept' && request.method === 'POST') {
@@ -56,7 +56,7 @@ export async function handleTenantApi(request: Request, env: Env, session: Sessi
     const method = request.method;
     if (/^(token-usage\/(projects|table|series)|cost\/(table|series))$/.test(path) && method === 'GET') {
         const args = dashboardArguments(url, tenantId);
-        const name = 'get_' + path.replaceAll('-', '_').replace('/', '_');
+        const name = (rolloutReads ? 'organization_get_' : 'get_') + path.replaceAll('-', '_').replace('/', '_');
         const params: Record<string, unknown> = path.endsWith('/projects')
             ? { p_tenant_id: tenantId, ...(args.p_source ? { p_source: args.p_source } : {}) } : { ...args };
         if (!path.endsWith('/series')) delete params.p_bucket;

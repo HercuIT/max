@@ -1,6 +1,6 @@
 import { PGlite } from '@electric-sql/pglite';
 import assert from 'node:assert/strict';
-import { assertFreshDatabase, includeSourceFilter } from './database-fixture.mjs';
+import { assertFreshDatabase, includeSourceFilter, setupFixture } from './database-fixture.mjs';
 
 export async function checkFixtureHelpers() {
     const included = "do $$ begin raise notice '$& $1 $$'; end $$;";
@@ -11,6 +11,10 @@ export async function checkFixtureHelpers() {
     const db = new PGlite();
     try {
         await assertFreshDatabase(sql => db.query(sql));
+        await db.exec('create role fixture_non_superuser; set role fixture_non_superuser');
+        await assert.rejects(setupFixture(sql=>db.exec(sql),{pglite:true}),error=>error.code==='42501'&&/superuser login/.test(error.message));
+        await db.exec('reset role');
+        await assertFreshDatabase(sql=>db.query(sql));
         for (const fixture of [
             'create schema unrelated_customer',
             'create table public.unrelated(id integer)',

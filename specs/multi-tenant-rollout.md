@@ -2,6 +2,8 @@
 
 Status: implementation and release checklist for [multi-tenant support](multi-tenant-support.md) and its [Supabase architecture](supabase-tenancy.md).
 
+The implemented [organizations/data design](organizations-and-data-migration.md) and [online runbook](../docs/organizations-online.md) add staged live-writer compatibility, model provenance, operator exports and a seven-day purge recovery window. Production cutover and retention decisions remain separate release gates. Use that runbook for continuous ingestion; the original maintenance cutover is a separate operational choice.
+
 ## Phase 1: schema expansion and historical ownership
 
 1. Inventory deployed migrations, every callable RPC/view, Worker routes, grants, RLS state, exporter configurations, and backups. Include the Codex/source migration if not deployed yet; multi-tenancy builds on it.

@@ -12,12 +12,18 @@ Requires Node 24 (including native TypeScript imports for the DOM test runner) a
 npm ci
 npm test
 npm run test:database
+npm run test:online
+npm run test:organizations
+npm run test:rollout-safety
+npm run test:organization-guards
 npm run test:dashboard
 npx tsc --noEmit
 npx wrangler deploy --dry-run
 ```
 
 The Worker tests exercise auth, cookies, CSRF, tenant routing, administration, and ingestion with mocked external APIs, enforcing 90% coverage. The database runner executes the complete migration history in PGlite (PostgreSQL compiled to WASM), simulates Supabase roles and Auth identity, and checks RLS and lifecycle behavior. The fixture helpers also verify verbatim SQL inclusion and refuse initialized databases. Its UUID bootstrap substitute is test-only because PGlite lacks `uuid-ossp`. The DOM suite executes the actual page scripts and verifies source filtering, role controls, and stale-response isolation during tenant switches. These do not replace live Supabase email delivery, real-browser session validation, multi-connection lock checks, or production-scale query-plan review.
+
+The PostgreSQL integration suites (`test:postgres`, `test:online:postgres`, and `test:staged`) require distinct fresh disposable databases and a superuser login in `TEST_DATABASE_URL`. Fixture setup creates cluster roles and gives the synthetic `service_role` Supabase's real `BYPASSRLS` behavior; a non-superuser cannot configure that accurately. Use a dedicated local/CI test cluster, never production credentials or a shared customer database. The suites reject an unsupported login rather than silently omitting the privilege check.
 
 For local development, supply the variables below through a private `.dev.vars` file, then run `npx wrangler dev`. Cookie-authenticated manual testing requires HTTPS at the configured `APP_ORIGIN`; use Wrangler's HTTPS option/local trusted certificate or a dedicated HTTPS development origin. The `__Host-` cookies deliberately remain Secure/HttpOnly even in development. Never use a production database for automated integration tests.
 
@@ -38,9 +44,9 @@ The included Supabase Edge Function implements this contract with Resend. See [i
 
 Set Supabase Auth's Site URL to `APP_ORIGIN` and add `APP_ORIGIN/auth/callback?sb_flow_id=*` to Redirect URLs (replace `APP_ORIGIN` with the canonical HTTPS origin). The wildcard covers only the random flow ID query value; the origin and callback path remain fixed. Default Confirm signup and Magic Link templates work with PKCE email links. To also offer code entry, include `{{ .Token }}` in both templates. Links must open in the same browser that requested them within ten minutes; concurrent requests keep separate verifier cookies bound to their callback flow IDs. The callback exchanges the code server-side, clears the temporary HttpOnly verifier cookie, and redirects to the dashboard after a successful exchange. Invalid links return to sign-in, and Auth outages return HTTP 503; arbitrary return URLs are ignored. Configure a seven-day maximum session lifetime in Supabase to match the refresh cookie, a suitable idle timeout, and email OTP rate limits. The application additionally enforces shared database-backed limits: 20 Auth requests per IP/minute, 5 per email/10 minutes, 120 ingestion requests per IP/minute, 600 per key/minute, and 60 administration mutations per user/minute. Tune these in code with measured deployment traffic; do not replace them with per-isolate counters.
 
-`TENANCY_DATABASE_URL` is a separate operator-only database connection for the [staged maintenance rollout](docs/tenancy-operations.md), never a Worker binding. `TEST_DATABASE_URL` is reserved for fresh disposable PostgreSQL integration databases.
+`TENANCY_DATABASE_URL` is a separate operator-only database connection for [online rollout, provenance backfill and full organization export](docs/organizations-online.md), or the intentional [maintenance rollout](docs/tenancy-operations.md); never a Worker binding. `LEGACY_INGEST_TOKEN` is an operator-only temporary input for one-time legacy bridge registration, never a Worker binding or command argument; unset after registration. `TEST_DATABASE_URL` is reserved for fresh disposable PostgreSQL integration databases.
 
-The former `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired. Basic Auth and the shared exporter token are not fallback paths.
+The former `DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired in the normal release. The explicitly selected compatibility entry point can accept a separately registered, expiring legacy bearer only for the historical organization during online rollout. Basic Auth is never a fallback.
 
 ## Dashboard and administration
 
@@ -124,6 +130,8 @@ Use a URL-encoded `project` value per repository; it selects a project only with
 
 `index.ts` routes requests; `auth.ts` handles cookies/Auth/CSRF; `tenancy.ts` handles tenant APIs; `http.ts` owns safe errors, body bounds and service helpers; `telemetry.ts` normalizes both exporters. `dashboard.ts` and `pages.ts` serve plain JavaScript-in-HTML pages. The `UIStrings` class in `ui-strings.ts` owns shared UI/email/error copy and supplies the browser catalog; reuse its existing labels and parameterized messages before adding wording. `supabase/migrations/` is immutable migration history; `scripts/` and `tests/` provide isolation checks.
 
-Pull requests run validation without deployment. Main-branch releases validate tests/type/bundle, apply migrations, then deploy the Worker in one serialized workflow. CI refuses the original pending tenancy cutover until its staged rollout is verified and explicitly recorded as applied by an operator. See the [cutover runbook](docs/tenancy-operations.md) before merging the tenancy migration: stop legacy writers, back up/rehearse, claim historical ownership, provision Supabase Auth and runtime variables, and update exporters. A code merge is not proof that credentials, Auth/email settings, or live production behavior work. Tenant purge is operator-run and idempotent; no purge cron runs automatically.
+Pull requests run validation without deployment. Main-branch releases validate tests/type/bundle, apply migrations, then deploy the Worker in one serialized workflow. CI refuses the original pending tenancy cutover until its staged rollout is verified and explicitly recorded as applied by an operator. Use the [online rollout runbook](docs/organizations-online.md) to keep legacy ingestion live, or choose an intentional [maintenance cutover](docs/tenancy-operations.md). Both require backup rehearsal, explicit historical ownership, Auth/runtime provisioning and exporter rotation. A code merge is not proof that production configuration works. Tenant purge is operator-run, idempotent, and blocked for seven days after deletion request; no purge cron runs automatically.
+
+Stored Claude model labels remain audit evidence and are marked `legacy_hardcoded`; model-aware reads and full exports report them as `unknown`. Codex's reported models remain separate. The additive migration classifies new writes immediately; the bounded operator backfill/finalization handles old rows without rewriting measurements. Full organization JSONL exports preserve exact numeric strings and require the current verified owner/admin; see the online runbook.
 
 Design contracts: [product](specs/multi-tenant-support.md), [Supabase architecture](specs/supabase-tenancy.md), [rollout acceptance gates](specs/multi-tenant-rollout.md).

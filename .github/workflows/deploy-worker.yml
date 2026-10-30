@@ -28,6 +28,16 @@ concurrency:
 jobs:
   validation:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: local-test-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -37,9 +47,34 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run test:database
+      - run: npm run test:online
+      - run: npm run test:organizations
+      - run: npm run test:rollout-safety
+      - run: npm run test:organization-guards
       - run: npm run test:dashboard
+      - name: Create isolated PostgreSQL test databases
+        run: |
+          node --input-type=module <<'JS'
+          import pg from 'pg';
+          const db=new pg.Client({connectionString:'postgresql://postgres:local-test-only@127.0.0.1:5432/postgres'});
+          await db.connect();
+          try { for (const name of ['tenant_concurrency','tenant_online','tenant_staged']) await db.query('create database '+name); }
+          finally { await db.end(); }
+          JS
+      - run: npm run test:postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:local-test-only@127.0.0.1:5432/tenant_concurrency
+      - run: npm run test:online:postgres
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:local-test-only@127.0.0.1:5432/tenant_online
+      - run: npm run test:staged
+        env:
+          TEST_DATABASE_URL: postgresql://postgres:local-test-only@127.0.0.1:5432/tenant_staged
       - run: npx tsc --noEmit
       - run: npx wrangler deploy --dry-run
+        env:
+          WRANGLER_SEND_METRICS: "false"
+      - run: npx wrangler deploy compatibility.ts --dry-run
         env:
           WRANGLER_SEND_METRICS: "false"
 

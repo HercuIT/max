@@ -5,6 +5,7 @@ specs/*
 !specs/multi-tenant-support.md
 !specs/supabase-tenancy.md
 !specs/multi-tenant-rollout.md
+!specs/organizations-and-data-migration.md
 .env.local
 coverage/
 

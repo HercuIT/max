@@ -36,7 +36,7 @@ jobs:
           trap 'rm -f "$preview"' EXIT
           supabase db push --dry-run >"$preview" 2>&1
           if grep -q '20261028210000' "$preview"; then
-            echo "The tenancy cutover is pending. Run scripts/stage-tenancy.mjs in the approved maintenance window, verify historical totals, and explicitly repair migration 20261028210000 as applied. See docs/tenancy-operations.md."
+            echo "The tenancy cutover is pending. Choose the approved online or maintenance procedure, verify historical data and authorization, and explicitly reconcile migration 20261028210000 only after completion. See docs/organizations-online.md."
             exit 1
           fi
 
