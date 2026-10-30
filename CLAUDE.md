@@ -49,7 +49,7 @@ Add every new runtime/test/client environment variable to this inventory. Never 
 | `INVITATION_DELIVERY_URL` | Optional HTTPS mail integration accepting `{to,subject,text}` |
 | `INVITATION_DELIVERY_TOKEN` | Optional secret bearer credential for delivery integration |
 
-`DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired and must not authorize any route.
+`DASHBOARD_USERNAME`, `DASHBOARD_PASSWORD`, and `INGEST_SECRET_TOKEN` are retired and must not authorize any route in the normal `index.ts` release. The separate `compatibility.ts` entry point is only for the [online rollout](docs/organizations-online.md): its legacy bearer requires a one-time database registration scoped to the historical tenant, expires within seven days, and is revoked before retiring that build. It never supports Basic Auth.
 
 | Supabase Edge Function secret | Purpose |
 | --- | --- |
@@ -62,6 +62,7 @@ These are set on Supabase, not as additional Worker bindings. Never log email pa
 | Optional local test name | Purpose |
 | --- | --- |
 | `TENANCY_DATABASE_URL` | Operator-only database credential for staged maintenance rollout; never a Worker binding, never log or commit |
+| `LEGACY_INGEST_TOKEN` | Operator-only existing exporter secret for one-time online bridge registration; never a Worker binding, log, command argument, or committed value; unset after registration |
 | `TEST_DATABASE_URL` | Fresh disposable PostgreSQL connection string for `test:postgres`; local-only, never a Worker binding; do not log or commit |
 | `TEST_AUTH_URL` | Loopback-only disposable GoTrue origin for `test:auth-live`; defaults to port 55433 |
 | `TEST_AUTH_JWT_SECRET` | Synthetic local Auth-container JWT signing secret for `test:auth-live`; never a production binding |
@@ -93,4 +94,4 @@ Run `npm test`, `npm run test:database`, `npm run test:dashboard`, `npx tsc --no
 
 When fixing a bug: identify the precise symptom, examine parser/server/UI/Auth/database/CI cause categories, trace the actual root cause, check every affected path, and add positive/negative/edge regressions for each. Preserve existing telemetry behavior while closing authorization gaps. Do not stop at the first passing symptom check.
 
-CI validates, applies migrations, then deploys through one serialized workflow. The tenancy migration is a coordinated maintenance cutover; historical data remains unclaimed until an operator assigns a verified owner. Follow the runbook and do not deploy old global-auth code once multiple tenants exist. Do not perform production migration, publication, email sends or deletion merely to test a local change.
+CI validates, applies migrations, then deploys through one serialized workflow. A pending tenancy cutover requires the separately approved online stages in docs/organizations-online.md or an intentional maintenance cutover; automatic execution is refused. Historical data remains unclaimed until an operator assigns a verified owner. Do not deploy old global-auth code once multiple tenants exist. Provenance is classified at the database boundary; never report hardcoded Claude labels as verified models. Full organization exports are operator-assisted and model-aware; purge requires the seven-day recovery window. Do not perform production migration, publication, email sends or deletion merely to test a local change.

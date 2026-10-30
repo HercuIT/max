@@ -1,6 +1,6 @@
 # Spec: Organizations and Existing Data Migration
 
-Status: proposed design for approval. This document authorizes no implementation, migration, deployment, credential change, or production operation.
+Status: implementation authorized in chat; local code and verification are in progress. Operational instructions are in [online rollout](../docs/organizations-online.md). No production migration, deployment, credential change, or purge is authorized by this document alone.
 
 ## Purpose
 

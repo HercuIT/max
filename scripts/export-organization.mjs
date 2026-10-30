@@ -43,9 +43,11 @@ export async function exportOrganization(db,{tenantId,userId,outputPath,batchSiz
   await fs.link(partial,outputPath);
   return {outputPath,rows:totals.rows};
  }finally{
-  if(inTransaction)await db.query('rollback');
-  if(file)await file.close();
-  await fs.unlink(partial).catch(error=>{if(error.code!=='ENOENT')throw error;});
+  try{if(inTransaction)await db.query('rollback');}
+  finally{
+   try{if(file)await file.close();}
+   finally{await fs.unlink(partial).catch(error=>{if(error.code!=='ENOENT')throw error;});}
+  }
   // Delivery remains operator-assisted; a prepared/published artifact is not
   // evidence it was emailed or downloaded. No customer data is printed.
  }

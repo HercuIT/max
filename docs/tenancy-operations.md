@@ -1,5 +1,7 @@
 # Tenant operations and cutover
 
+For continuous ingestion, use [the online rollout](organizations-online.md). The pause-writers procedure below is an intentional maintenance alternative, not the online design. Already upgraded deployments apply only appended changes and bounded model-provenance backfill; never replay historical ownership.
+
 This is a breaking, fail-closed authorization cutover. Preparing code/tests does not run these production steps. Use an operator-controlled maintenance window. Keep all credentials out of shell tracing, source, logs, and shared reports.
 
 ## Before migration
@@ -68,7 +70,7 @@ Invitations expire after seven days. Acceptance checks the current verified Auth
 
 ## Deletion, retention and recovery
 
-An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. A trusted operator processes pending jobs with:
+An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. The appended recovery migration blocks purge until `purge_after` (seven days); during that window an operator can cancel through the checked cancellation RPC without reviving revoked credentials. Prepare the organization export before requesting deletion. A trusted operator processes eligible pending jobs with:
 
 ```sql
 select public.purge_tenant('00000000-0000-4000-8000-000000000000'::uuid);

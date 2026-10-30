@@ -16,11 +16,18 @@ try{
  await setupFixture(sql=>db.query(sql),{pglite:!postgres,applyMigration:async(name,sql)=>{
   if(!name.startsWith('20261028210000')){await db.query(sql);return;}
   await assert.rejects(verifyLegacyHistory(db),/ledger is missing/);
+  await db.query("insert into public.projects(name) values('during-expansion')");
   await stageOnlineTenancy(db,{through:1});
   await db.query(`set role service_role`);
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens,total_cost_usd) values('during-expansion','claude','claude-3-5-sonnet',3,0.123456)");
   await db.query('reset role');
   assert.equal((await db.query("select model_provenance from public.token_usage_logs where project_name='during-expansion'")).rows[0].model_provenance,'legacy_hardcoded');
+  let writer,writing=true,writeTask,writes=0;
+  if(postgres){
+   writer=new pg.Client({connectionString:process.env.TEST_DATABASE_URL});await writer.connect();await writer.query('set role service_role');
+   writeTask=(async()=>{while(writing&&writes<100){await writer.query("insert into public.token_usage_logs(project_name,source,input_tokens) values('parallel-live','claude',0)");writes++;await new Promise(resolve=>setTimeout(resolve,2));}})();
+  }
+  try{
   await assert.rejects(stageOnlineTenancy(db,{through:6,batchSize:1,onProgress:message=>{
    if(message.startsWith('Committed '))throw new Error('planned committed-batch interruption');
   }}),/planned committed-batch/);
@@ -28,6 +35,8 @@ try{
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens) values('during-backfill','codex','gpt-reported',4)");
   await db.query('reset role');
   await stageOnlineTenancy(db,{through:6,batchSize:1});
+  }finally{writing=false;if(writeTask)await writeTask;if(writer)await writer.end();}
+  if(postgres)assert(writes>0,'a separate PostgreSQL connection inserted while backfill/validation/index builds ran');
   assert.equal((await db.query('select sum(input_tokens)::text as n from public.token_usage_logs')).rows[0].n,'16');
   assert.equal((await db.query("select sum(total_cost_usd)::text as n from public.token_usage_logs")).rows[0].n,'0.123456');
   await db.query("insert into auth.users(id,email,email_confirmed_at) values('40000000-0000-4000-8000-000000000001','gate@example.test',now())");
@@ -38,6 +47,10 @@ try{
   await assert.rejects(db.query("select public.ingest_legacy_telemetry(repeat('f',64),'[]')"),/Unauthorized/);
   await db.query('reset role');
   await stageOnlineTenancy(db,{through:7,batchSize:1});
+  // Ledger reconciliation after 007 must not prevent later retirement at 008.
+  await db.query(`begin; create schema supabase_migrations; create table supabase_migrations.schema_migrations(version text primary key);
+   insert into supabase_migrations.schema_migrations values('20261022222115'),('20261022223638'),('20261024150026'),('20261024183711'),('20261028190000'),('20261028195000'),('20261028210000');`);
+  await verifyLegacyHistory(db);await db.query('rollback');
   assert.equal((await db.query("select to_regprocedure('public.get_token_usage_projects(text)') is null as retired")).rows[0].retired,true);
   assert.equal((await db.query("select has_function_privilege('service_role','private.get_token_usage_projects(text)','execute') as allowed")).rows[0].allowed,false);
   assert.equal((await db.query("select has_table_privilege('service_role','public.project_spend_summary','select') as allowed")).rows[0].allowed,false);

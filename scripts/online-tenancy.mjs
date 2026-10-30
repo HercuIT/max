@@ -15,19 +15,39 @@ export async function verifyLegacyHistory(db) {
  if(!present)throw new Error('Migration ledger is missing; inventory deployment state before proceeding.');
  const applied=new Set((await db.query('select version from supabase_migrations.schema_migrations')).rows.map(x=>x.version));
  const earlier=['20261022222115','20261022223638','20261024150026','20261024183711','20261028190000','20261028195000'];
- if(earlier.some(x=>!applied.has(x))||applied.has(version))throw new Error('Online legacy path requires all earlier migrations and a pending tenancy cutover.');
+ let completedOnline=false;
+ if(applied.has(version)){
+  const state=(await db.query("select to_regclass('private.organization_rollout_state') is not null as present")).rows[0].present;
+  if(state)completedOnline=!!(await db.query('select phase>=7 as completed from private.organization_rollout_state where singleton')).rows[0]?.completed;
+ }
+ if(earlier.some(x=>!applied.has(x))||(applied.has(version)&&!completedOnline))throw new Error('Online legacy path requires earlier migrations and either a pending cutover or its verified online progress.');
 }
 
 export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementTimeoutMs=60000,onProgress=()=>{}}={}) {
  if(!Number.isInteger(through)||through<1||through>8)throw new Error('Through must be a stage from 1 to 8.');
  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>10000)throw new Error('Batch size must be between 1 and 10000.');
  if(!Number.isInteger(statementTimeoutMs)||statementTimeoutMs<1000||statementTimeoutMs>3600000)throw new Error('Invalid statement timeout.');
- const checksum=createHash('sha256').update(stageFiles.map(readStage).join('\n')+readStage('legacy-bridge.sql')+readStage('verify.sql')).digest('hex');
+ const checksum=createHash('sha256').update(stageFiles.map(readStage).join('\n')+readStage('legacy-bridge.sql')+readStage('verify.sql')+readStage('verify-authorization.sql')).digest('hex');
  if(!(await db.query("select pg_try_advisory_lock(hashtext('burnrate-staged-tenancy')) as acquired")).rows[0].acquired)throw new Error('Another tenancy rollout is running.');
- async function transaction(work,phase){
-  await db.query('begin');
-  try{await work();if(phase!==undefined)await db.query('update private.organization_rollout_state set phase=$1,updated_at=now() where singleton',[phase]);await db.query('commit');}
-  catch(error){await db.query('rollback');throw error;}
+ async function transaction(work,phase,catalog=false){
+  for(let attempt=0;;attempt++){
+   await db.query('begin');
+   try{
+    if(catalog){
+     // Legacy inserts lock logs before projects; scoped RPCs lock tenants first.
+     // Never wait for a second table while holding the first: NOWAIT breaks the
+     // inversion between these two writer generations without deadlocking one.
+     await db.query('lock table public.token_usage_logs in access exclusive mode');
+     await db.query('lock table public.projects in access exclusive mode nowait');
+     if(phase!==1)await db.query('lock table public.tenants,public.tenant_memberships,auth.users in access exclusive mode nowait');
+    }
+    await work();if(phase!==undefined)await db.query('update private.organization_rollout_state set phase=$1,updated_at=now() where singleton',[phase]);await db.query('commit');return;
+   }catch(error){
+    await db.query('rollback');
+    if(!['55P03','40P01'].includes(error.code)||attempt>=7)throw error;
+    await new Promise(resolve=>setTimeout(resolve,100*(attempt+1)));
+   }
+  }
  }
  try{
   await db.query("set lock_timeout='5s'");
@@ -50,7 +70,7 @@ export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementT
   if(!state||state.checksum!==checksum)throw new Error('Online rollout checksum changed; reconcile before resuming.');
   let phase=state.phase;
   const progress=n=>onProgress(`Online stage ${n} committed.`);
-  if(phase<1&&through>=1){await transaction(()=>db.query(readStage(stageFiles[0])),1);phase=1;progress(1);}
+  if(phase<1&&through>=1){await transaction(()=>db.query(readStage(stageFiles[0])),1,true);phase=1;progress(1);}
   if(phase<2&&through>=2){
    await transaction(()=>db.query(readStage(stageFiles[1])));
    if(!state.baseline_captured)await transaction(async()=>{
@@ -81,7 +101,7 @@ export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementT
   if(phase<3&&through>=3){
    await addConstraints(readStage(stageFiles[2]));await validate(['projects','token_usage_logs']);
    await transaction(()=>db.query(`alter table public.projects alter column tenant_id set not null;
-    alter table public.token_usage_logs alter column tenant_id set not null,alter column project_id set not null,alter column model_provenance set not null;`),3);
+    alter table public.token_usage_logs alter column tenant_id set not null,alter column project_id set not null,alter column model_provenance set not null;`),3,true);
    phase=3;progress(3);
   }
   if(phase<4&&through>=4){
@@ -99,13 +119,14 @@ export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementT
    await transaction(()=>db.query(readStage('verify.sql')),5);phase=5;progress(5);
   }
   if(phase<6&&through>=6){
-   await transaction(async()=>{await db.query(readStage(stageFiles[5]));await db.query(readStage('legacy-bridge.sql'));},6);phase=6;progress(6);
+   await transaction(async()=>{await db.query(readStage(stageFiles[5]));await db.query(readStage('legacy-bridge.sql'));},6,true);phase=6;progress(6);
   }
   if(phase<7&&through>=7){
-   await transaction(async()=>{await db.query(readStage('verify.sql'));await db.query(readStage(stageFiles[6]));},7);phase=7;progress(7);
+   await transaction(async()=>{await db.query(readStage('verify.sql'));await db.query(readStage(stageFiles[6]));await db.query(readStage('verify-authorization.sql'));},7,true);phase=7;progress(7);
   }
-  if(phase<8&&through>=8){await transaction(()=>db.query(readStage(stageFiles[7])),8);phase=8;progress(8);}
+  if(phase<8&&through>=8){await transaction(()=>db.query(readStage(stageFiles[7])),8,true);phase=8;progress(8);}
   if(phase>=2)await db.query(readStage('verify.sql'));
+  if(phase>=7)await db.query(readStage('verify-authorization.sql'));
   return {phase,checksum};
  }finally{await db.query("select pg_advisory_unlock(hashtext('burnrate-staged-tenancy'))");}
 }
