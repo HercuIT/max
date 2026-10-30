@@ -10,6 +10,7 @@ import type { Env } from './types';
 export type { Env } from './types';
 export { jsonResponse } from './http';
 export { findAttr, parseClaudeMetrics, parseCodexLogs } from './telemetry';
+const TENANT_INGEST_BEARER = /^Bearer (brk_[0-9a-f]{64})$/;
 
 export function handleFaviconAsset(pathname: string): Response | null {
     const asset = faviconAssets[pathname];
@@ -19,7 +20,7 @@ export function handleFaviconAsset(pathname: string): Response | null {
 }
 export async function handleIngest(request: Request, env: Env, url: URL, requestId = crypto.randomUUID(), legacy = false): Promise<Response> {
     if (request.method !== 'POST') throw new ApiError(405, 'method_not_allowed', UIStrings.text.usePost);
-    const token = request.headers.get('Authorization')?.match(legacy ? /^Bearer ([^\s]{1,512})$/ : /^Bearer (brk_[0-9a-f]{64})$/)?.[1];
+    const token = request.headers.get('Authorization')?.match(legacy ? /^Bearer ([^\s]{1,512})$/ : TENANT_INGEST_BEARER)?.[1];
     // Limit failed attempts by trusted Cloudflare IP, not a caller-supplied forwarding header.
     await rateLimit(env, 'ingest-ip', request.headers.get('CF-Connecting-IP') ?? 'unknown', 120);
     if (!token) throw new ApiError(401, 'unauthorized', UIStrings.text.unauthorized);
@@ -61,7 +62,7 @@ export function workerFor({ legacyIngest = false, rolloutReads = false } = {}) {
             if (asset) response = asset;
             else if (url.pathname === '/auth/callback') response = await handleAuthCallback(request, env, headers);
             else if (url.pathname === '/v1/metrics' || url.pathname === '/v1/logs') response = await handleIngest(request, env, url, requestId,
-                legacyIngest && !/^Bearer brk_[0-9a-f]{64}$/.test(request.headers.get('Authorization') ?? ''));
+                legacyIngest && !TENANT_INGEST_BEARER.test(request.headers.get('Authorization') ?? ''));
             else {
                 const session = url.pathname === '/auth/sign-out' ? null : await sessionFor(request, env, headers);
                 if (url.pathname === '/api/session' || ['/auth/sign-in', '/auth/verify', '/auth/sign-out'].includes(url.pathname)) {

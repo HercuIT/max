@@ -1,6 +1,6 @@
 # Spec: Organizations and Existing Data Migration
 
-Status: implementation authorized in chat; local implementation and verification are included. Operational instructions are in [online rollout](../docs/organizations-online.md). No production migration, deployment, credential change, or purge is authorized by this document alone.
+Status: implementation contract. The user authorized implementation in chat; local code and verification are included. Outstanding questions below concern production ownership, rollout and retention decisions, not permission to implement. Operational instructions are in [online rollout](../docs/organizations-online.md). No production migration, deployment, credential change, or purge is authorized by this document alone.
 
 ## Purpose
 
@@ -8,7 +8,7 @@ Turn Burnrate into a shared-table SaaS while preserving every existing usage row
 
 Recommendation: retain the repository's existing tenant architecture, add an online compatibility phase for databases still on the legacy schema, and record model provenance without rewriting historical measurements. An organization is a tenant; keep the implemented SQL name `tenant_id` as the physical `organization_id`. Do not introduce a second ownership column or duplicate organization tables.
 
-Companion contracts: [product and roles](multi-tenant-support.md), [Supabase architecture](supabase-tenancy.md), [rollout tests](multi-tenant-rollout.md), and [current operations](../docs/tenancy-operations.md). This proposal changes the proposed rollout and historical-model treatment; those documents and the deployment guards must be reconciled in a later approved implementation.
+Companion contracts: [product and roles](multi-tenant-support.md), [Supabase architecture](supabase-tenancy.md), [rollout tests](multi-tenant-rollout.md), and [current operations](../docs/tenancy-operations.md). The implementation adds staged online rollout and historical-model treatment; those documents and the deployment guards describe the corresponding operator gates.
 
 ## Repository findings and differences from the request
 
@@ -78,7 +78,7 @@ Recommend **both required function parameters and RLS**:
 | Worker dashboard APIs | Validated user session; list/check current memberships; required tenant UUID; fresh publishable-key client with that user's JWT |
 | Three `get_token_usage_*` RPCs | Required `p_tenant_id uuid`, explicit tenant predicate before aggregation, project join on tenant and project ID, `SECURITY INVOKER`, fixed empty search path |
 | `get_cost_table` and `get_cost_series` | Same required parameter, predicate, join, and invoker RLS; cumulative windows cannot cross organizations |
-| Public organization/membership/project/log tables | Authenticated SELECT only under current-membership/active-organization RLS; no anonymous policy or direct user mutations |
+| Public organization/membership/project/log tables | Authenticated SELECT only on dashboard-safe columns under current-membership/active-organization RLS; raw host/email attribution stays operator-only; no anonymous policy or direct user mutations |
 | Management/invitation RPCs | Explicit tenant/target pairing, current `auth.uid()` and role checks inside checked transactions; last-owner guard under organization lock |
 | Private credential/audit/invitation data | Private schema not exposed by PostgREST; no direct anon/authenticated table grants; safe metadata only through checked RPCs |
 | Ingest/bootstrap/purge | Explicit service-role-only grants; narrow operations with their own checks because service role bypasses RLS |
@@ -131,13 +131,13 @@ Before execution, inspect the deployed migration ledger, actual schema/grants, W
 
 If tenancy is **already applied**, skip legacy ownership expansion/backfill and the shared-token bridge; verify existing invariants and append only missing provenance/export-support changes. Do not alter other organizations' rows or weaken current authorization.
 
-If `20261028210000` is **pending**, simply appending migrations cannot make its earlier maintenance-only transaction online. Keep the current CI refusal. A later implementation must supply a separately reviewed staged release/ledger reconciliation that replaces execution of that pending cutover with the approved online stages, preserves the immutable file, and verifies the resulting schema. Do not falsely mark it applied while its required state is missing, run unrestricted migration push, or run the current `stage-tenancy.mjs --confirm-maintenance` procedure with live writers. Any retained old view/function definitions versus the original migration must be explicit in that reconciliation. Approval of this design alone does not approve a ledger repair.
+If `20261028210000` is **pending**, simply appending migrations cannot make its earlier maintenance-only transaction online. Keep the current CI refusal. The implemented online runner supplies independently committed stages without changing the ledger; a separately authorized operator release/ledger reconciliation replaces execution of that pending cutover, preserves the immutable file, and verifies the resulting schema. Do not falsely mark it applied while its required state is missing, run unrestricted migration push, or run `stage-tenancy.mjs --confirm-maintenance` with live writers. Retained old view/function definitions versus the original migration are explicit in the [runbook](../docs/organizations-online.md). Implementation authorization does not authorize a ledger repair.
 
-The following are **logical numbered migration filenames**, not files created by this change or timestamps claimed to be ready for Supabase discovery. Generate real versions with the project's migration tooling after approval and deployment-history reconciliation. Split concurrent-index operations into a runner that permits nontransactional statements. Each stage has its own precondition, verification, and compensating rollback below.
+The following numbered SQL stage files are implemented under `scripts/organizations/`, outside Supabase's automatic migration discovery. The online runner executes concurrent-index operations outside transaction blocks and tracks resumable progress. Already-upgraded databases instead use appended migration `20261030162837_organizations_model_provenance_and_recovery.sql` and the bounded provenance backfill script; they never replay historical ownership. Each online stage has its own precondition, verification, and compensating rollback below.
 
 1. `001_expand_organizations.sql` — Create/reuse organization and private lifecycle tables, add nullable `tenant_id`/`project_id` and nullable model provenance, and install the bounded legacy compatibility writer atomically.
 2. `002_backfill_organization_ownership.sql` — Run restartable bounded batches assigning legacy ownership, creating missing projects, linking usage, and classifying model provenance with a progress/undo manifest.
-3. `003_require_organization_ownership.sql` — Prove no null ownership remains, validate temporary not-null checks, then set ownership/project/provenance columns NOT NULL under brief locks.
+3. `003_require_organization_ownership.sql` — Prove no null ownership remains, validate temporary not-null checks, then set ownership/project/provenance columns NOT NULL and remove those proof checks in the same brief catalog transaction.
 4. `004_index_organization_data.sql` — Build organization/project unique and usage lookup indexes concurrently, preserving old indexes and global project uniqueness temporarily.
 5. `005_validate_organization_relationships.sql` — Attach new uniqueness, add tenant and composite project foreign keys as NOT VALID, then validate independently without rewriting measurements.
 6. `006_add_scoped_authorization.sql` — Add separate scoped invoker read RPCs, RLS/helpers and checked lifecycle/ingestion operations; keep legacy readers available only during the single-organization bridge.
@@ -196,7 +196,7 @@ Invitations are expiring one-time secrets stored as digests, proposed seven-day 
 
 Provide export before deletion: retain any implemented table download behavior, but distinguish summaries from a complete organization export. Recommend an owner/admin-requested, operator-assisted export initially rather than adding a new public endpoint. Export organization/project metadata and all usage (including source, raw model and provenance) from one consistent organization-scoped snapshot, with row counts, totals, schema version and timestamps. Omit credential/invitation digests and unrelated Auth profiles; deliver securely after current-role verification. Record export in audit. It requires no dashboard response-shape change. A later asynchronous export service must scope every job/result by organization and recheck access on retrieval.
 
-An owner types the organization name to request deletion. Disable reads/ingest, revoke keys/invitations, and enqueue purge in one transaction. Recommend a seven-day recovery window before an explicit operator purge, subject to retention approval. The current purge RPC has no delay guard, so enforcing this policy needs a future checked eligibility timestamp; it is not already guaranteed by code. Cancellation before purge may reactivate access after authorization review, but revoked secrets stay revoked and replacement keys are issued.
+An owner types the organization name to request deletion. Disable reads/ingest, revoke keys/invitations, and enqueue purge in one transaction. The appended recovery migration enforces a seven-day recovery window with `purge_after` before an explicit operator purge. During that window a service-role/operator call to `public.cancel_tenant_deletion(tenant_uuid, verified_owner_uuid)` may reactivate access after authorization review, but revoked secrets stay revoked and replacement keys are issued. Production retention and backup policies must still be confirmed before enabling deletion.
 
 Purge usage, projects, memberships, keys and invitations by organization; preserve other organizations and shared Auth users. It is intentionally **destructive and not reversible without backup**, and is a separately authorized lifecycle operation, never part of these migrations. Keep minimal restricted audit/job metadata for the approved retention period. Explain when backups expire and that deletion does not immediately erase every backup. Restores must reapply deletion requests and revocations to avoid reviving deleted data or access.
 
@@ -227,11 +227,11 @@ Use real multi-connection PostgreSQL tests for ingest versus revoke/delete, simu
 
 In dashboard DOM/browser tests, switch A to B while A projects/table/series/comparison requests are delayed; no stale data, error, KPI, or export can render. Verify only current memberships appear, no-membership state, sign-in/sign-out, source/date preference retention, and same-name project selection reset. Use real HTTPS sessions and disposable Auth for integration evidence.
 
-Later implementation gates include Worker tests, database tests, dashboard tests, type checking and bundle dry-run, plus representative query plans, restore rehearsal and real concurrency checks. None of those tests or operational actions are needed to execute this documentation-only change; no test results or production readiness are claimed here.
+Implementation validation includes Worker tests, database/RLS tests, dashboard tests, type checking, and dry-run bundles for the normal and compatibility entry points. The test scripts also cover provenance/export behavior and real PostgreSQL concurrency. Record the results for each release. Production-scale query plans, a restore rehearsal, real email/HTTPS session validation, and durable collector recovery evidence remain operator release gates; local tests alone do not establish production readiness.
 
 ## Assumptions
 
-- The current checkout is authoritative for naming and parser behavior; production's applied migration/Worker state is unknown and will be inventoried before implementation.
+- The current checkout is authoritative for naming and parser behavior; production's applied migration/Worker state is unknown and will be inventoried before production rollout.
 - All genuinely pre-tenancy data belongs to one organization; proposed HercuIT and its owner must be confirmed explicitly. Existing multi-organization ownership is authoritative and will not be reassigned.
 - Continuous ingest means no planned writer pause and preservation of every accepted point; lossless recovery of unacknowledged points additionally requires durable retry/replay evidence before rollout.
 - Preserving `tenant_id` as the physical organization key is preferable to renaming implemented APIs/schema. Display names are not security identifiers.
@@ -242,8 +242,8 @@ Later implementation gates include Worker tests, database tests, dashboard tests
 
 1. Confirm HercuIT as owner of all pre-tenancy data and identify its verified first-owner Auth UUID. Are there any historical rows that belong elsewhere and require an explicit ownership mapping?
 2. Is production still pre-tenancy, already upgraded, or partially staged? Approve deployment-history reconciliation only after that inventory; the existing maintenance runbook cannot be used unchanged for this online requirement.
-3. Approve the limited metadata contractions and tenant-safe rollback boundary: after a second organization writes, rollback cannot restore single-tenant global uniqueness/auth without losing isolation or data.
-4. Approve a seven-day legacy-token overlap where needed, and identify all exporters plus their durable retry/collector guarantees. If those guarantees are absent, should a durable collector be provisioned before the rollout?
-5. Approve preserving raw model labels with provenance and reporting hardcoded Claude models as unknown. Should reading real Claude model attributes be a separately reviewed follow-up?
-6. Approve operator-assisted organization creation/full export, seven-day invitation expiry, and a seven-day deletion recovery window. Decide export delivery, audit retention, backup retention/PITR and eventual purge policy before enabling deletion.
-7. Approve this spec before any implementation. This document alone does not authorize production migration, deployment, invitations, credential retirement, deletion, or ledger repair.
+3. Confirm the production rollback target and window for the implemented metadata contractions: after a second organization writes, rollback cannot restore single-tenant global uniqueness/auth without losing isolation or data.
+4. Schedule the implemented seven-day legacy-token overlap where needed, and identify all exporters plus their durable retry/collector guarantees. If those guarantees are absent, should a durable collector be provisioned before rollout?
+5. Raw model labels are preserved with provenance and hardcoded Claude models are reported as unknown. Should reading real Claude model attributes be a separately reviewed follow-up?
+6. The implementation uses operator-assisted organization creation/full export, seven-day invitation expiry, and a seven-day deletion recovery window. Decide production export delivery, audit retention, backup retention/PITR and eventual purge policy before enabling deletion.
+7. When should the separately authorized production rollout occur after its gates pass? Implementation is already authorized; production migration, deployment, invitations, credential retirement, deletion, and ledger repair remain separate operations.

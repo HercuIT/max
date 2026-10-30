@@ -2,7 +2,7 @@
 
 Status: implementation contract; production cutover is not automatic. Implements the [multi-tenant product contract](multi-tenant-support.md); migration and test sequencing are in [rollout](multi-tenant-rollout.md).
 
-The approved [organizations/data design](organizations-and-data-migration.md) extends this contract with an [online staged rollout](../docs/organizations-online.md), classified model provenance, a model-safe invoker view, operator-assisted full exports, and checked seven-day purge eligibility. The normal Worker keeps retired global credentials disabled; only the explicit compatibility artifact can use the database-gated historical bridge.
+The implemented [organizations/data design](organizations-and-data-migration.md) extends this contract with an [online staged rollout](../docs/organizations-online.md), classified model provenance, a model-safe invoker view, operator-assisted full exports, and checked seven-day purge eligibility. Implementation was authorized in chat; production release gates remain separate. Authenticated usage grants cover dashboard-safe columns, while raw host/email attribution is available through the authorized operator-assisted full export. The normal Worker keeps retired global credentials disabled; only the explicit compatibility artifact can use the database-gated historical bridge.
 
 ## Trust boundaries
 

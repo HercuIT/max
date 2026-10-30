@@ -1,6 +1,7 @@
 do $$
 begin
- if not (select count(*)=5 and bool_and(p.proargtypes[0]='uuid'::regtype and not p.prosecdef
+ if not (select count(*)=5 and count(distinct p.proname)=5 and bool_and(coalesce(p.proargtypes[0]='uuid'::regtype,false) and not p.prosecdef
+  and coalesce(p.proconfig @> array['search_path=""'],false)
   and not has_function_privilege('anon',p.oid,'EXECUTE')
   and not has_function_privilege('service_role',p.oid,'EXECUTE')
   and has_function_privilege('authenticated',p.oid,'EXECUTE'))
@@ -13,8 +14,14 @@ begin
   or has_table_privilege('anon','public.token_usage_logs','SELECT,INSERT,UPDATE,DELETE,TRUNCATE')
   or has_table_privilege('authenticated','public.token_usage_logs','INSERT,UPDATE,DELETE,TRUNCATE')
   or has_table_privilege('service_role','public.token_usage_logs','INSERT,UPDATE,DELETE,TRUNCATE')
+  or has_table_privilege('anon','public.project_spend_summary','SELECT')
+  or has_table_privilege('authenticated','public.project_spend_summary','SELECT')
   or has_table_privilege('service_role','public.project_spend_summary','SELECT') then
   raise exception 'RLS, legacy view or direct-write grants are unsafe.';
+ end if;
+ if has_column_privilege('authenticated','public.token_usage_logs','host_name','SELECT')
+  or has_column_privilege('authenticated','public.token_usage_logs','user_email','SELECT') then
+  raise exception 'Raw telemetry attribution is exposed to ordinary tenant readers.';
  end if;
  if not (select count(*)=3 and bool_and(convalidated) from pg_constraint where conname in
   ('projects_tenant_id_fkey','token_usage_logs_tenant_id_fkey','usage_tenant_project_fk')) then

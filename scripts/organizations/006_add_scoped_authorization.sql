@@ -10,7 +10,10 @@ alter table public.tenant_memberships enable row level security;
 alter table public.projects enable row level security;
 alter table public.token_usage_logs enable row level security;
 revoke all on public.tenants,public.tenant_memberships,public.projects,public.token_usage_logs from public,anon,authenticated;
-grant select on public.tenants,public.tenant_memberships,public.projects,public.token_usage_logs to authenticated;
+grant select on public.tenants,public.tenant_memberships,public.projects to authenticated;
+grant select(id,tenant_id,project_id,project_name,source,session_id,model,
+ input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_cost_usd,recorded_at)
+ on public.token_usage_logs to authenticated;
 -- Privileged writes are confined to audited definer functions; no direct API writes.
 
 create policy tenant_read on public.tenants for select to authenticated using(private.tenant_role(id) is not null);
@@ -511,3 +514,10 @@ begin
 end; $$;
 revoke all on function public.cancel_tenant_deletion(uuid,uuid) from public,anon,authenticated;
 grant execute on function public.cancel_tenant_deletion(uuid,uuid) to service_role;
+-- Narrow human reads without changing tenant RLS or dashboard RPC responses.
+-- Full host/email attribution stays available only to the checked operator export.
+revoke select on public.token_usage_logs from public,anon,authenticated;
+revoke select(host_name,user_email) on public.token_usage_logs from public,anon,authenticated;
+grant select(id,tenant_id,project_id,project_name,source,session_id,model,model_provenance,
+ input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_cost_usd,recorded_at)
+ on public.token_usage_logs to authenticated;

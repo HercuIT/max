@@ -1,11 +1,13 @@
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 
-export async function backfillModelProvenance(db,{batchSize=5000,onProgress=()=>{}}={}) {
+export async function backfillModelProvenance(db,{batchSize=5000,statementTimeoutMs=60000,onProgress=()=>{}}={}) {
  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>10000)throw new Error('Invalid batch size.');
+ if(!Number.isInteger(statementTimeoutMs)||statementTimeoutMs<1000||statementTimeoutMs>86400000)throw new Error('Statement timeout must be between 1000 and 86400000 ms.');
  if(!(await db.query("select pg_try_advisory_lock(hashtext('burnrate-model-provenance')) as acquired")).rows[0].acquired)throw new Error('Another provenance backfill is running.');
  try{
-  await db.query("set lock_timeout='5s'; set statement_timeout='60s'");
+  await db.query("set lock_timeout='5s'");
+  await db.query("select set_config('statement_timeout',$1,false)",[String(statementTimeoutMs)]);
   while(true){const n=(await db.query('select public.backfill_model_provenance($1) as n',[batchSize])).rows[0].n;if(!n)break;onProgress(`Committed ${n} provenance assignments.`);}
   const pending=(await db.query('select exists(select 1 from public.token_usage_logs where model_provenance is null) as pending')).rows[0].pending;
   if(pending)throw new Error('Some rows are locked or unclassified; retry finalization later.');
@@ -21,7 +23,7 @@ export async function backfillModelProvenance(db,{batchSize=5000,onProgress=()=>
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
  if(!process.argv.includes('--confirm-backup-rehearsed')||!process.env.TENANCY_DATABASE_URL)throw new Error('Read the runbook; set TENANCY_DATABASE_URL securely and attest --confirm-backup-rehearsed.');
  const db=new pg.Client({connectionString:process.env.TENANCY_DATABASE_URL});
- try{await db.connect();await backfillModelProvenance(db,{onProgress:console.log});console.log('Model provenance backfill and constraints verified.');}
- catch{console.error('Provenance backfill stopped; inspect privately and resume.');process.exitCode=1;}
+ try{await db.connect();await backfillModelProvenance(db,{statementTimeoutMs:Number(process.argv.find(x=>x.startsWith('--statement-timeout-ms='))?.split('=')[1]??60000),onProgress:console.log});console.log('Model provenance backfill and constraints verified.');}
+ catch(error){console.error('Provenance backfill stopped; inspect privately and resume. Database code:',/^[A-Z0-9]{5}$/.test(error.code??'')?error.code:'operator-check');process.exitCode=1;}
  finally{await db.end();}
 }

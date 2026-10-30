@@ -49,6 +49,8 @@ jobs:
       - run: npm run test:database
       - run: npm run test:online
       - run: npm run test:organizations
+      - run: npm run test:rollout-safety
+      - run: npm run test:organization-guards
       - run: npm run test:dashboard
       - name: Create isolated PostgreSQL test databases
         run: |

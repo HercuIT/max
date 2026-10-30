@@ -97,7 +97,7 @@ export class UIStrings {
         organizationName: 'Organization name',
         rename: 'Rename',
         deleteOrganization: 'Delete organization',
-        deletionNotice: 'This immediately disables access and ingestion. Request an export first. An operator can cancel deletion during the seven-day recovery window; revoked keys stay revoked. Purge is manual after that window.',
+        deletionNotice: 'This immediately disables access and ingestion. Ask an operator for an export first. An operator can cancel deletion during the seven-day recovery window; revoked keys stay revoked. Purge is manual after that window.',
         typeOrganizationName: 'Type the organization name',
         requestDeletion: 'Request deletion',
         tokenUsage: 'Token Usage',

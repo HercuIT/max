@@ -18,10 +18,15 @@ insert into public.token_usage_logs(tenant_id,project_id,project_name,source,mod
 insert into public.token_usage_logs(tenant_id,project_id,project_name,source,model,input_tokens,total_cost_usd)
  select tenant_id,id,name,'codex','gpt-reported',999,99 from public.projects where tenant_id=current_setting('test.org.b')::uuid and name='api';
 select pg_temp.check_true((select model_provenance='legacy_hardcoded' from public.token_usage_logs where project_name='api' and source='claude'),'caller cannot assert reported Claude provenance');
+select pg_temp.check_true((select model_provenance='reported' and effective_model='gpt-reported' and raw_model='gpt-reported'
+ from public.token_usage_model_attribution where tenant_id=current_setting('test.org.b')::uuid),'reported Codex model retains its label');
 select pg_temp.check_true((select bool_and(effective_model='unknown' and raw_model='claude-3-5-sonnet') from public.token_usage_model_attribution where tenant_id=current_setting('test.org.a')::uuid and raw_model='claude-3-5-sonnet'),'effective model suppresses hardcoded label');
 select pg_temp.denied($q$insert into public.token_usage_logs(tenant_id,project_id,project_name) select current_setting('test.org.a')::uuid,id,name from public.projects where tenant_id=current_setting('test.org.b')::uuid$q$,'23503');
 set local role authenticated;
 select set_config('request.jwt.claim.sub','30000000-0000-4000-8000-000000000001',true);
+select pg_temp.denied('select host_name from public.token_usage_logs','42501');
+select pg_temp.denied('select user_email from public.token_usage_logs','42501');
+select pg_temp.check_true((select sum(input_tokens)=10 from public.token_usage_logs where project_name='api'),'safe dashboard fields remain readable under RLS');
 select pg_temp.check_true(not exists(select 1 from public.token_usage_model_attribution where tenant_id=current_setting('test.org.b')::uuid),'model view respects RLS');
 select pg_temp.check_true(not exists(select 1 from public.get_token_usage_projects(current_setting('test.org.b')::uuid)),'foreign projects hidden');
 select pg_temp.check_true(not exists(select 1 from public.get_token_usage_series(current_setting('test.org.b')::uuid)),'foreign token series hidden');

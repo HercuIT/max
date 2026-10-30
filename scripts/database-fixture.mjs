@@ -28,6 +28,13 @@ export function includeSourceFilter(assertions, sourceFilter) {
 }
 
 export async function setupFixture(execute, { pglite = false, applyMigration = (_name, sql) => execute(sql) } = {}) {
+    // Disposable fixtures create cluster roles and need real service-role RLS
+    // bypass. Do not silently weaken that simulation for an unprivileged login.
+    await execute(`do $$ begin
+     if not exists(select 1 from pg_roles where rolname=current_user and rolsuper) then
+      raise exception using errcode='42501',message='Database fixtures require a superuser login on a fresh disposable PostgreSQL database.';
+     end if;
+    end $$;`);
     await execute(`do $$ begin if not exists(select 1 from pg_roles where rolname='anon') then create role anon; end if; if not exists(select 1 from pg_roles where rolname='authenticated') then create role authenticated; end if; if not exists(select 1 from pg_roles where rolname='service_role') then create role service_role; end if; end $$;
  -- Match Supabase's privileged service role, including its RLS bypass. Explicit
  -- function/table revocations, not RLS, must restrict service operations.

@@ -59,9 +59,9 @@ Add every new runtime/test/client environment variable to this inventory. Never 
 
 These are set on Supabase, not as additional Worker bindings. Never log email payloads or provider errors.
 
-| Optional local test name | Purpose |
+| Operator and optional test variable | Purpose |
 | --- | --- |
-| `TENANCY_DATABASE_URL` | Operator-only database credential for staged maintenance rollout; never a Worker binding, never log or commit |
+| `TENANCY_DATABASE_URL` | Operator-only database credential for online/maintenance rollout, provenance backfill and full organization export; never a Worker binding, never log or commit |
 | `LEGACY_INGEST_TOKEN` | Operator-only existing exporter secret for one-time online bridge registration; never a Worker binding, log, command argument, or committed value; unset after registration |
 | `TEST_DATABASE_URL` | Fresh disposable PostgreSQL connection string for `test:postgres`; local-only, never a Worker binding; do not log or commit |
 | `TEST_AUTH_URL` | Loopback-only disposable GoTrue origin for `test:auth-live`; defaults to port 55433 |

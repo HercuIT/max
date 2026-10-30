@@ -5,8 +5,18 @@ import {randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+class ExportRequestError extends Error {
+ constructor(code,message){super(message);this.code=code;}
+}
+export function exportFailureMessage(error) {
+ if(error instanceof ExportRequestError)return `Organization export failed (${error.code}): ${error.message}`;
+ if(error?.code==='EEXIST')return 'Organization export failed (EEXIST): output already exists; choose a new private output path.';
+ if(/^[A-Z0-9]{5}$/.test(error?.code??''))return `Organization export failed; database SQLSTATE: ${error.code}. Inspect privately before retrying.`;
+ if(['ECONNREFUSED','ECONNRESET','ENOTFOUND','ETIMEDOUT'].includes(error?.code))return `Organization export failed; connection error: ${error.code}. Check the operator connection and retry.`;
+ return 'Organization export failed; inspect privately. No provider details or credentials printed.';
+}
 export async function exportOrganization(db,{tenantId,userId,outputPath,batchSize=500}={}) {
- if(!uuid.test(tenantId??'')||!uuid.test(userId??'')||!outputPath||!Number.isInteger(batchSize)||batchSize<1||batchSize>10000)throw new Error('Supply organization, verified owner/admin UUID, output path and a valid batch size.');
+ if(!uuid.test(tenantId??'')||!uuid.test(userId??'')||!outputPath||!Number.isInteger(batchSize)||batchSize<1||batchSize>10000)throw new ExportRequestError('INVALID_EXPORT_REQUEST','Supply organization, verified owner/admin UUID, output path and a valid batch size.');
  const partial=outputPath+'.'+randomUUID()+'.partial';
  let file,inTransaction=false;
  const authorized=async()=>!!(await db.query(`select 1 from public.tenants t join public.tenant_memberships m on m.tenant_id=t.id
@@ -17,7 +27,7 @@ export async function exportOrganization(db,{tenantId,userId,outputPath,batchSiz
   const write=row=>file.write(JSON.stringify(row)+'\n');
   await db.query('begin isolation level repeatable read');inTransaction=true;
   await db.query("set local statement_timeout='60s'; set local lock_timeout='5s'");
-  if(!await authorized())throw new Error('Organization export requires its current verified owner or admin.');
+  if(!await authorized())throw new ExportRequestError('EXPORT_NOT_AUTHORIZED','Organization export requires its current verified owner or admin.');
   const tenant=(await db.query('select id,name,status,created_at from public.tenants where id=$1',[tenantId])).rows[0];
   await write({type:'manifest',schemaVersion:1,exportedAt:new Date().toISOString(),organization:tenant});
   const projects=(await db.query('select id,name,created_at from public.projects where tenant_id=$1 order by id',[tenantId])).rows;
@@ -38,7 +48,7 @@ export async function exportOrganization(db,{tenantId,userId,outputPath,batchSiz
   await db.query("insert into private.tenant_audit_events(tenant_id,actor_id,action) values($1,$2,'export.prepared')",[tenantId,userId]);
   await db.query('commit');inTransaction=false;
   await file.sync();await file.close();file=null;
-  if(!await authorized())throw new Error('Export authorization changed; file was not published.');
+  if(!await authorized())throw new ExportRequestError('EXPORT_AUTHORIZATION_CHANGED','Export authorization changed; file was not published.');
   // Link is exclusive, unlike rename which can overwrite a prior export.
   await fs.link(partial,outputPath);
   return {outputPath,rows:totals.rows};
@@ -57,6 +67,6 @@ if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
  if(!process.env.TENANCY_DATABASE_URL)throw new Error('Set TENANCY_DATABASE_URL securely.');
  const db=new pg.Client({connectionString:process.env.TENANCY_DATABASE_URL});
  try{await db.connect();await exportOrganization(db,{tenantId:args['--organization'],userId:args['--requester'],outputPath:args['--output']});console.log('Organization export prepared. Verify recipient access and deliver securely.');}
- catch{console.error('Organization export failed; no data or credentials printed.');process.exitCode=1;}
+ catch(error){console.error(exportFailureMessage(error));process.exitCode=1;}
  finally{await db.end();}
 }

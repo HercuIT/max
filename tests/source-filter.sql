@@ -19,10 +19,12 @@ select pg_temp.check_true((
 ),'five required-tenant dashboard RPCs allow authenticated execute but no anonymous execute or legacy overloads');
 select pg_temp.check_true(
  not has_table_privilege('anon','public.token_usage_logs','SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
- and has_table_privilege('authenticated','public.token_usage_logs','SELECT')
+ and has_column_privilege('authenticated','public.token_usage_logs','tenant_id','SELECT')
+ and not has_column_privilege('authenticated','public.token_usage_logs','host_name','SELECT')
+ and not has_column_privilege('authenticated','public.token_usage_logs','user_email','SELECT')
  and not has_table_privilege('authenticated','public.token_usage_logs','INSERT,UPDATE,DELETE,TRUNCATE')
  and (select relrowsecurity from pg_class where oid='public.token_usage_logs'::regclass)
-,'raw usage is anonymous-private and authenticated read-only under RLS');
+,'safe usage columns are authenticated read-only under RLS, with raw attribution excluded');
 select pg_temp.check_true((select sum(total_tokens)=19 from public.get_token_usage_table(current_setting('test.a')::uuid,p_source=>'claude')),'Claude token table includes only Claude rows');
 select pg_temp.check_true((select count(*)=0 from public.get_token_usage_projects(current_setting('test.a')::uuid,'claude') where project_name='codex-only'),'Claude project list excludes Codex-only projects');
 select pg_temp.check_true((select count(*)=1 from public.get_token_usage_projects(current_setting('test.a')::uuid,'codex') where project_name='codex-only'),'Codex-only project is present in its own source list');

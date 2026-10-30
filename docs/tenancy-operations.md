@@ -70,7 +70,7 @@ Invitations expire after seven days. Acceptance checks the current verified Auth
 
 ## Deletion, retention and recovery
 
-An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. The appended recovery migration blocks purge until `purge_after` (seven days); during that window an operator can cancel through the checked cancellation RPC without reviving revoked credentials. Prepare the organization export before requesting deletion. A trusted operator processes eligible pending jobs with:
+An owner confirms the organization name to request deletion. This disables RLS access/ingestion, revokes keys/invitations and inserts a row in `private.tenant_deletion_jobs`. The appended recovery migration blocks purge until `purge_after` (seven days); during that window an operator can call `public.cancel_tenant_deletion(tenant_uuid, verified_owner_uuid)` with the deleting organization's UUID and its independently verified owner's Auth UUID. This RPC is executable only by `service_role` and the database owner; cancellation does not revive revoked credentials. Prepare the organization export before requesting deletion. A trusted operator processes eligible pending jobs with:
 
 ```sql
 select public.purge_tenant('00000000-0000-4000-8000-000000000000'::uuid);

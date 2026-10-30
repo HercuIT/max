@@ -14,12 +14,16 @@ npm test
 npm run test:database
 npm run test:online
 npm run test:organizations
+npm run test:rollout-safety
+npm run test:organization-guards
 npm run test:dashboard
 npx tsc --noEmit
 npx wrangler deploy --dry-run
 ```
 
 The Worker tests exercise auth, cookies, CSRF, tenant routing, administration, and ingestion with mocked external APIs, enforcing 90% coverage. The database runner executes the complete migration history in PGlite (PostgreSQL compiled to WASM), simulates Supabase roles and Auth identity, and checks RLS and lifecycle behavior. The fixture helpers also verify verbatim SQL inclusion and refuse initialized databases. Its UUID bootstrap substitute is test-only because PGlite lacks `uuid-ossp`. The DOM suite executes the actual page scripts and verifies source filtering, role controls, and stale-response isolation during tenant switches. These do not replace live Supabase email delivery, real-browser session validation, multi-connection lock checks, or production-scale query-plan review.
+
+The PostgreSQL integration suites (`test:postgres`, `test:online:postgres`, and `test:staged`) require distinct fresh disposable databases and a superuser login in `TEST_DATABASE_URL`. Fixture setup creates cluster roles and gives the synthetic `service_role` Supabase's real `BYPASSRLS` behavior; a non-superuser cannot configure that accurately. Use a dedicated local/CI test cluster, never production credentials or a shared customer database. The suites reject an unsupported login rather than silently omitting the privilege check.
 
 For local development, supply the variables below through a private `.dev.vars` file, then run `npx wrangler dev`. Cookie-authenticated manual testing requires HTTPS at the configured `APP_ORIGIN`; use Wrangler's HTTPS option/local trusted certificate or a dedicated HTTPS development origin. The `__Host-` cookies deliberately remain Secure/HttpOnly even in development. Never use a production database for automated integration tests.
 

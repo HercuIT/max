@@ -4,7 +4,7 @@ Status: implementation contract. Local implementation and tests are included; pr
 
 Companion documents: [Supabase architecture](supabase-tenancy.md) and [rollout and acceptance tests](multi-tenant-rollout.md).
 
-The approved [organizations and existing data design](organizations-and-data-migration.md) adds online ingest compatibility, honest historical model provenance, full operator-assisted export and a seven-day deletion recovery window. See its [implementation runbook](../docs/organizations-online.md); the maintenance-only cutover remains an alternative, not a continuous-ingestion procedure.
+The implemented [organizations and existing data design](organizations-and-data-migration.md) adds online ingest compatibility, honest historical model provenance, full operator-assisted export and a seven-day deletion recovery window. Implementation was authorized in chat; production operations still require their release gates. See its [implementation runbook](../docs/organizations-online.md); the maintenance-only cutover remains an alternative, not a continuous-ingestion procedure.
 
 ## Goal and terminology
 

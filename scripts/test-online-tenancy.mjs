@@ -12,15 +12,27 @@ const postgres=process.argv.includes('--postgres');
 if(postgres&&!process.env.TEST_DATABASE_URL)throw new Error('Set TEST_DATABASE_URL to a NEW disposable PostgreSQL database.');
 const engine=postgres?new pg.Client({connectionString:process.env.TEST_DATABASE_URL}):new PGlite();
 if(postgres)await engine.connect();
-const db=postgres?engine:{query:async(sql,params)=>params?engine.query(sql,params):(await engine.exec(sql)).at(-1)};
+const connection=postgres?engine:{query:async(sql,params)=>params?engine.query(sql,params):(await engine.exec(sql)).at(-1)};
+let activeStatementTimeout,indexBuilds=0;
+const db={query:async(sql,params)=>{
+ if(sql==="select set_config('statement_timeout',$1,false)")activeStatementTimeout=Number(params[0]);
+ if(/^create (?:unique )?index concurrently /.test(sql)){
+  assert.equal(activeStatementTimeout,1800000,'concurrent builds use their dedicated thirty-minute timeout');indexBuilds++;
+ }
+ return connection.query(sql,params);
+}};
 try{
  await assertFreshDatabase(sql=>db.query(sql));
  await setupFixture(sql=>db.query(sql),{pglite:!postgres,applyMigration:async(name,sql)=>{
   if(!name.startsWith('20261028210000')){await db.query(sql);return;}
   await assert.rejects(verifyLegacyHistory(db),/ledger is missing/);
   await db.query("insert into public.projects(name) values('during-expansion')");
+  await db.query("insert into public.projects(name) values('orphan-history')");
   await db.query("insert into public.token_usage_logs(project_name,input_tokens) values('default-project',0)");
   await stageOnlineTenancy(db,{through:1});
+  await db.query('begin; delete from private.organization_rollout_state');
+  await assert.rejects(db.query("insert into public.tenants(name) values('missing-state-must-deny')"),/admission gate/);
+  await db.query('rollback');
   await db.query(`set role service_role`);
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens,total_cost_usd) values('during-expansion','claude','claude-3-5-sonnet',3,0.123456)");
   await db.query('reset role');
@@ -37,10 +49,22 @@ try{
   await db.query('set role service_role');
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens) values('during-backfill','codex','gpt-reported',4)");
   await db.query('reset role');
+  await stageOnlineTenancy(db,{through:2,batchSize:1});
+  await db.query("begin; update public.projects set tenant_id='60000000-0000-4000-8000-000000000001' where name='orphan-history'");
+  await assert.rejects(db.query(readStage('verify.sql')),/Historical project cohort differs/);
+  await db.query('rollback');
+  // This user-owned pending check deliberately fails on an old row. Rollout
+  // validation must neither scan it nor mark it validated.
+  await db.query("alter table public.token_usage_logs add constraint unrelated_pending check(project_name<>'legacy-repo') not valid");
   await stageOnlineTenancy(db,{through:6,batchSize:1});
+  assert.equal((await db.query("select convalidated from pg_constraint where conname='unrelated_pending'")).rows[0].convalidated,false);
+  assert.equal((await db.query("select count(*)::int as n from pg_constraint where conname in ('projects_tenant_required','usage_tenant_required','usage_project_required','usage_provenance_required')")).rows[0].n,0);
   }finally{writing=false;try{if(writeTask)await writeTask;}finally{if(writer)await writer.end();}}
   if(writerError)throw writerError;
-  if(postgres)assert(writes>0,'a separate PostgreSQL connection inserted while backfill/validation/index builds ran');
+  if(postgres){
+   assert(writes>0,'a separate PostgreSQL connection inserted during the online rollout');
+   assert.equal((await db.query("select count(*)::int as n from public.token_usage_logs where project_name='parallel-live'")).rows[0].n,writes,'every acknowledged concurrent insert must survive');
+  }
   assert.equal((await db.query('select sum(input_tokens)::text as n from public.token_usage_logs')).rows[0].n,'16');
   assert.equal((await db.query("select sum(total_cost_usd)::text as n from public.token_usage_logs")).rows[0].n,'0.123456');
   assert.equal((await db.query("select count(*)::int as n from public.token_usage_logs where project_name='default-project'")).rows[0].n,1);
@@ -64,16 +88,19 @@ try{
   await assert.rejects(db.query("insert into public.token_usage_logs(project_name) values('rejected-after-drain')"),/permission denied/);
   await db.query('reset role');
   await stageOnlineTenancy(db,{through:8});
+  assert.equal((await db.query("select count(*)::int as n from private.tenant_audit_events where action='legacy-bridge.retire'")).rows[0].n,1);
   await db.query('set role service_role');
   await assert.rejects(db.query("select public.ingest_legacy_telemetry(repeat('c',64),'[]')"),/Unauthorized/);
   await assert.rejects(db.query("select public.ingest_telemetry(repeat('c',64),'[]')"),/Unauthorized/);
   await db.query('reset role');
   await stageOnlineTenancy(db,{through:8});
+  assert.equal((await db.query("select count(*)::int as n from private.tenant_audit_events where action='legacy-bridge.retire'")).rows[0].n,1,'completed-stage replay cannot duplicate retirement audit');
   assert.equal((await db.query("select to_regclass('supabase_migrations.schema_migrations') is null as untouched")).rows[0].untouched,true);
  }});
  await db.query(fs.readFileSync(new URL('../tests/organizations.sql',import.meta.url),'utf8'));
  // Final backfill NOT NULL proof remains effective with normal narrow ingestion.
  assert.equal((await db.query("select is_nullable from information_schema.columns where table_schema='public' and table_name='token_usage_logs' and column_name='model_provenance'")).rows[0].is_nullable,'NO');
+ assert.equal(indexBuilds,5);assert.equal(activeStatementTimeout,60000,'ordinary stage timeout is restored after index builds');
  console.log('PASS: online SQL stages, live legacy inserts, interrupted batch restart, fixed-cohort checks, admission gate, bounded bridge/retirement, grants/RLS, model provenance and deletion recovery; '+(postgres?'PostgreSQL':'PGlite (single connection)'));
 }catch(error){console.error('Online test failed:',error.message);process.exitCode=1;}
 finally{await(postgres?engine.end():engine.close());}

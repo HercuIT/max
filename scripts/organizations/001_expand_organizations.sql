@@ -58,7 +58,7 @@ revoke all on private.organization_baseline_usage,private.organization_baseline_
 create function private.guard_organization_admission() returns trigger language plpgsql security definer set search_path='' as $$
 begin
  if new.id<>'00000000-0000-4000-8000-000000000001'::uuid and
-  (select phase<7 from private.organization_rollout_state where singleton) then
+  coalesce((select phase<7 from private.organization_rollout_state where singleton),true) then
   raise exception using errcode='PT409',message='Organization rollout has not passed its admission gate.';
  end if;
  return new;
