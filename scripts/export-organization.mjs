@@ -5,14 +5,18 @@ import {randomUUID} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const filesystemCodes=new Set(['EACCES','EPERM','EROFS','EBUSY','EXDEV','ENOENT','ENOSPC','EDQUOT','ENAMETOOLONG','ENOTDIR','EISDIR','EIO','EMFILE','ENFILE','ELOOP','ENOSYS','ENOTSUP']);
 class ExportRequestError extends Error {
  constructor(code,message){super(message);this.code=code;}
 }
 export function exportFailureMessage(error) {
  if(error instanceof ExportRequestError)return `Organization export failed (${error.code}): ${error.message}`;
  if(error?.code==='EEXIST')return 'Organization export failed (EEXIST): output already exists; choose a new private output path.';
- if(/^[A-Z0-9]{5}$/.test(error?.code??''))return `Organization export failed; database SQLSTATE: ${error.code}. Inspect privately before retrying.`;
  if(['ECONNREFUSED','ECONNRESET','ENOTFOUND','ETIMEDOUT'].includes(error?.code))return `Organization export failed; connection error: ${error.code}. Check the operator connection and retry.`;
+ // Node system errors can also have five-character codes (EPERM/EROFS/etc.).
+ // Never mislabel a failed filesystem syscall as a PostgreSQL SQLSTATE.
+ if(typeof error?.syscall==='string'||filesystemCodes.has(error?.code))return `Organization export failed; filesystem error: ${filesystemCodes.has(error?.code)?error.code:'system-error'}. Check the private output directory and filesystem before retrying.`;
+ if(/^[A-Z0-9]{5}$/.test(error?.code??''))return `Organization export failed; database SQLSTATE: ${error.code}. Inspect privately before retrying.`;
  return 'Organization export failed; inspect privately. No provider details or credentials printed.';
 }
 export async function exportOrganization(db,{tenantId,userId,outputPath,batchSize=500}={}) {

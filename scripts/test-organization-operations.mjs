@@ -29,8 +29,22 @@ try{
  const syntheticToken='existing-🔑-test-token';
  await registerLegacyIngest(registrationDb,{token:syntheticToken,expiresAt:'2026-11-01T12:00:00-06:00'});
  assert.equal(registrationQueries[0][0],'select public.register_legacy_ingest($1,$2::timestamptz)');
- assert.deepEqual(registrationQueries[0][1],[await workerDigest(syntheticToken),'2026-11-01T18:00:00.000Z']);
+ assert.deepEqual(registrationQueries[0][1],[await workerDigest(syntheticToken),'2026-11-01T12:00:00-06:00']);
  assert.match(registrationQueries[0][1][0],/^[0-9a-f]{64}$/);
+ const databaseExpiryQueries=[];
+ const databaseExpiryDb={query:async(sql,params)=>{
+  assert.equal(sql,'select public.register_legacy_ingest($1,$2::timestamptz)');
+  databaseExpiryQueries.push(params[1]);
+  // Exercise the same typed PostgreSQL cast as the registration call without
+  // registering a real bridge or mocking PostgreSQL's calendar validation.
+  return db.query('select $1::timestamptz as expires_at',[params[1]]);
+ }};
+ await registerLegacyIngest(databaseExpiryDb,{token:syntheticToken,expiresAt:'2026-11-01T12:00:00-06:00'});
+ for(const expiresAt of ['2026-02-31T12:00:00Z','2026-02-29T12:00:00-06:00']){
+  assert(Number.isFinite(Date.parse(expiresAt)),'regression fixture must be a date JavaScript silently rolls forward');
+  await assert.rejects(registerLegacyIngest(databaseExpiryDb,{token:syntheticToken,expiresAt}),{code:'22008'});
+  assert.equal(databaseExpiryQueries.at(-1),expiresAt,'PostgreSQL must receive the original invalid calendar date');
+ }
  for(const token of [undefined,null,123,'','has space','has\nnewline','x'.repeat(513)]){
   const before=registrationQueries.length;
   await assert.rejects(registerLegacyIngest(registrationDb,{token,expiresAt:'2026-11-01T18:00:00Z'}),{code:'INVALID_LEGACY_REGISTRATION'});
@@ -44,6 +58,15 @@ try{
  for(const message of [exportFailureMessage({code:'42501',message:'private-secret'}),registrationFailureMessage({code:'PT409',message:'private-secret'})]){
   assert.match(message,/SQLSTATE/);assert(!message.includes('private-secret'));
  }
+ for(const code of ['EPERM','EROFS','EBUSY','EXDEV']){
+  for(const syscall of [undefined,'open','link']){
+   const diagnostic=exportFailureMessage({code,syscall,path:'private-path',message:'private-secret'});
+   assert.match(diagnostic,/filesystem error/);assert(diagnostic.includes(code));
+   assert(!diagnostic.includes('SQLSTATE'));assert(!diagnostic.includes('private-path'));assert(!diagnostic.includes('private-secret'));
+  }
+ }
+ assert(!exportFailureMessage({code:'42501',syscall:'open',message:'private-secret'}).includes('SQLSTATE'),'a system syscall must not be classified as a database error');
+ assert(!registrationFailureMessage({code:'EPERM',syscall:'connect',message:'private-secret'}).includes('SQLSTATE'));
  for(const format of [exportFailureMessage,registrationFailureMessage]){
   assert.match(format({code:'ECONNREFUSED',message:'private-secret'}),/ECONNREFUSED/);
   assert(!format(new Error('private-secret')).includes('private-secret'));
@@ -105,7 +128,7 @@ try{
  }};
  await assert.rejects(exportOrganization(revoked,{tenantId:a,userId:owner,outputPath:path.join(directory,'revoked.jsonl')}),/authorization changed/);
  assert.deepEqual((await fs.readdir(directory)).sort(),['a.jsonl','empty.jsonl']);
- console.log('PASS: registration Worker-hash parity, UTC expiry/validation, sanitized diagnostics, bounded provenance restart/finalization and full tenant export isolation, exact numeric values, effective model, empty batches/audit, authorization predicates, no overwrite and fresh role check');
+ console.log('PASS: registration Worker-hash parity, explicit-zone expiry preservation/PostgreSQL calendar rejection, safe filesystem/database diagnostics, bounded provenance restart/finalization and full tenant export isolation, exact numeric values, effective model, empty batches/audit, authorization predicates, no overwrite and fresh role check');
 }catch(error){console.error('Organization operations test failed:',error.message);process.exitCode=1;}
 finally{
  await engine.close();

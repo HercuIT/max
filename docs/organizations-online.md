@@ -53,7 +53,7 @@ During stage 006 only, set the **operator-only** `LEGACY_INGEST_TOKEN` to the ex
 node scripts/register-legacy-ingest.mjs --expires-at=<ISO-UTC-expiry>
 ```
 
-Only SHA-256 is sent to the database. The expiry must include `Z` or an explicit UTC offset and is normalized to UTC before SQL binding. No token is written to a migration or printed. Remove the operator variable after registration. Registration is one-time and cannot be invoked on the normal already-upgraded path. Any exceptional extension/replacement requires a reviewed operator change; the application never automatically extends it.
+Only SHA-256 is sent to the database. The expiry must include `Z` or an explicit UTC offset and is bound unchanged so PostgreSQL validates its calendar date and timezone. No token is written to a migration or printed. Remove the operator variable after registration. Registration is one-time and cannot be invoked on the normal already-upgraded path. Any exceptional extension/replacement requires a reviewed operator change; the application never automatically extends it.
 
 After the separate production deployment authorization, deploy the compatibility entry point using Wrangler's entry-point argument. Validate owner login, scoped token/cost reads, empty-batch auth, both exporters, generic cross-org denials and real HTTPS cookie/CSRF behavior. Create normal organization keys and begin rotating exporters. Keep the old readers drained before proceeding; dashboard maintenance is acceptable while ingestion stays live. Never admit a second organization while the original global reads remain callable.
 

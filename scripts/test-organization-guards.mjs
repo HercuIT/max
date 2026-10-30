@@ -2,6 +2,7 @@ import {PGlite} from '@electric-sql/pglite';
 import assert from 'node:assert/strict';
 import {setupFixture} from './database-fixture.mjs';
 import {stageOnlineTenancy,readStage} from './online-tenancy.mjs';
+import {stageTenancy} from './stage-tenancy.mjs';
 const engine=new PGlite();
 const db={query:async(sql,params)=>params?engine.query(sql,params):(await engine.exec(sql)).at(-1)};
 const rollback=readStage('rollback-003.sql');
@@ -28,20 +29,42 @@ try{
   await stageOnlineTenancy(db,{through:7});
   assert.deepEqual(await flags(),['NO','NO','NO','NO']);
   const check=()=>db.query(readStage('verify-authorization.sql'));
-  for(const mutation of [
-   'alter function public.get_token_usage_projects(uuid,text) reset search_path',
-   'alter function public.get_token_usage_projects(uuid,text) set search_path=public',
-   `alter function public.get_token_usage_projects(uuid,text) set schema private;
+  const signatureError=/Canonical dashboard signatures or grants are unsafe/;
+  const accessError=/RLS, legacy view or direct-write grants are unsafe/;
+  const attributionError=/Raw telemetry attribution is exposed/;
+  for(const [mutation,expected] of [
+   ['alter function public.get_token_usage_projects(uuid,text) reset search_path',signatureError],
+   ['alter function public.get_token_usage_projects(uuid,text) set search_path=public',signatureError],
+   [`alter function public.get_token_usage_projects(uuid,text) set schema private;
     create function public.get_token_usage_projects() returns text language sql stable security invoker set search_path='' as $$select 'fixture'::text$$;
     revoke all on function public.get_token_usage_projects() from public,anon,service_role;
-    grant execute on function public.get_token_usage_projects() to authenticated;`,
-   'grant select on public.project_spend_summary to anon',
-   'grant select on public.project_spend_summary to authenticated',
-   'grant select(host_name) on public.token_usage_logs to authenticated',
+    grant execute on function public.get_token_usage_projects() to authenticated;`,signatureError],
+   [`alter function public.get_token_usage_projects(uuid,text) set schema private;
+    create function public.get_token_usage_projects(uuid,integer) returns text language sql stable security invoker set search_path='' as $$select 'fixture'::text$$;
+    revoke all on function public.get_token_usage_projects(uuid,integer) from public,anon,service_role;
+    grant execute on function public.get_token_usage_projects(uuid,integer) to authenticated;`,signatureError],
+   ['grant execute on function public.get_cost_table(uuid,text[],timestamptz,timestamptz,text) to service_role',signatureError],
+   ['grant select on public.project_spend_summary to anon',accessError],
+   ['grant select on public.project_spend_summary to authenticated',accessError],
+   ['grant select on public.project_spend_summary to service_role',accessError],
+   ['grant insert on public.token_usage_logs to authenticated',accessError],
+   ['grant insert on public.token_usage_logs to service_role',accessError],
+   ...['authenticated','anon'].flatMap(role=>['host_name','user_email'].map(column=>[
+    `grant select(${column}) on public.token_usage_logs to ${role}`,attributionError])),
   ]){
-   await db.query('begin');await db.query(mutation);await assert.rejects(check());await db.query('rollback');await check();
+   await db.query('begin');await db.query(mutation);await assert.rejects(check(),expected);await db.query('rollback');await check();
   }
  }});
- console.log('PASS: inert rollback reference, guarded phase-003 rollback/resume, preserved data, pinned search path and all-role view/attribution checks');
+ const maintenance=new PGlite();
+ const maintenanceDb={query:async(sql,params)=>params?maintenance.query(sql,params):(await maintenance.exec(sql)).at(-1)};
+ try{
+  await setupFixture(sql=>maintenanceDb.query(sql),{pglite:true,applyMigration:(name,sql)=>name.startsWith('20261028210000')?stageTenancy(maintenanceDb):maintenanceDb.query(sql)});
+  await stageTenancy(maintenanceDb); // Column-limited safe grants are sufficient.
+  await maintenanceDb.query('begin');
+  await maintenanceDb.query('revoke select(input_tokens) on public.token_usage_logs from authenticated');
+  await assert.rejects(stageTenancy(maintenanceDb),/Final schema verification failed/);
+  await maintenanceDb.query('rollback');await stageTenancy(maintenanceDb);
+ }finally{await maintenance.close();}
+ console.log('PASS: guarded rollback/resume, exact RPC signatures/search paths, all-role view/attribution and write grants, and complete staged-dashboard read privileges');
 }catch(error){console.error('Organization guard test failed:',error.message);process.exitCode=1;}
 finally{await engine.close();}

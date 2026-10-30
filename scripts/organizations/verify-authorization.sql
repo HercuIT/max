@@ -1,12 +1,19 @@
 do $$
 begin
- if not (select count(*)=5 and count(distinct p.proname)=5 and bool_and(coalesce(p.proargtypes[0]='uuid'::regtype,false) and not p.prosecdef
+ if not (with expected(signature) as (values
+  ('public.get_token_usage_projects(uuid,text)'),
+  ('public.get_token_usage_series(uuid,text[],timestamptz,timestamptz,text,text)'),
+  ('public.get_token_usage_table(uuid,text[],timestamptz,timestamptz,text)'),
+  ('public.get_cost_series(uuid,text[],timestamptz,timestamptz,text,text)'),
+  ('public.get_cost_table(uuid,text[],timestamptz,timestamptz,text)'))
+  select bool_and(p.oid is not null and not p.prosecdef
   and coalesce(p.proconfig @> array['search_path=""'],false)
   and not has_function_privilege('anon',p.oid,'EXECUTE')
   and not has_function_privilege('service_role',p.oid,'EXECUTE')
   and has_function_privilege('authenticated',p.oid,'EXECUTE'))
-  from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public'
-  and p.proname in ('get_token_usage_projects','get_token_usage_series','get_token_usage_table','get_cost_series','get_cost_table')) then
+  from expected e left join pg_proc p on p.oid=to_regprocedure(e.signature))
+  or (select count(*)<>5 from pg_proc p join pg_namespace n on n.oid=p.pronamespace
+   where n.nspname='public' and p.proname in ('get_token_usage_projects','get_token_usage_series','get_token_usage_table','get_cost_series','get_cost_table')) then
   raise exception 'Canonical dashboard signatures or grants are unsafe.';
  end if;
  if not (select count(*)=4 and bool_and(relrowsecurity) from pg_class where oid in
@@ -20,7 +27,9 @@ begin
   raise exception 'RLS, legacy view or direct-write grants are unsafe.';
  end if;
  if has_column_privilege('authenticated','public.token_usage_logs','host_name','SELECT')
-  or has_column_privilege('authenticated','public.token_usage_logs','user_email','SELECT') then
+  or has_column_privilege('authenticated','public.token_usage_logs','user_email','SELECT')
+  or has_column_privilege('anon','public.token_usage_logs','host_name','SELECT')
+  or has_column_privilege('anon','public.token_usage_logs','user_email','SELECT') then
   raise exception 'Raw telemetry attribution is exposed to ordinary tenant readers.';
  end if;
  if not (select count(*)=3 and bool_and(convalidated) from pg_constraint where conname in
