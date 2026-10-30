@@ -27,7 +27,9 @@ export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementT
  if(!Number.isInteger(through)||through<1||through>8)throw new Error('Through must be a stage from 1 to 8.');
  if(!Number.isInteger(batchSize)||batchSize<1||batchSize>10000)throw new Error('Batch size must be between 1 and 10000.');
  if(!Number.isInteger(statementTimeoutMs)||statementTimeoutMs<1000||statementTimeoutMs>3600000)throw new Error('Invalid statement timeout.');
- const checksum=createHash('sha256').update(stageFiles.map(readStage).join('\n')+readStage('legacy-bridge.sql')+readStage('verify.sql')+readStage('verify-authorization.sql')).digest('hex');
+ if(stageFiles.length!==8||stageFiles.some((name,i)=>!name.startsWith('00'+(i+1)+'_')))throw new Error('Expected exactly the eight reviewed online stages.');
+ const sources=[...stageFiles.map(readStage),readStage('legacy-bridge.sql'),readStage('verify.sql'),readStage('verify-authorization.sql'),fs.readFileSync(new URL(import.meta.url),'utf8')];
+ const checksum=createHash('sha256').update(sources.map(sql=>sql.replace(/\r\n/g,'\n')).join('\n')).digest('hex');
  if(!(await db.query("select pg_try_advisory_lock(hashtext('burnrate-staged-tenancy')) as acquired")).rows[0].acquired)throw new Error('Another tenancy rollout is running.');
  async function transaction(work,phase,catalog=false){
   for(let attempt=0;;attempt++){
@@ -122,7 +124,9 @@ export async function stageOnlineTenancy(db,{through=6,batchSize=5000,statementT
    await transaction(async()=>{await db.query(readStage(stageFiles[5]));await db.query(readStage('legacy-bridge.sql'));},6,true);phase=6;progress(6);
   }
   if(phase<7&&through>=7){
-   await transaction(async()=>{await db.query(readStage('verify.sql'));await db.query(readStage(stageFiles[6]));await db.query(readStage('verify-authorization.sql'));},7,true);phase=7;progress(7);
+   // Fixed-cohort scans run before and after, never under catalog-exclusive locks.
+   await db.query(readStage('verify.sql'));
+   await transaction(async()=>{await db.query(readStage(stageFiles[6]));await db.query(readStage('verify-authorization.sql'));},7,true);phase=7;progress(7);
   }
   if(phase<8&&through>=8){await transaction(()=>db.query(readStage(stageFiles[7])),8,true);phase=8;progress(8);}
   if(phase>=2)await db.query(readStage('verify.sql'));

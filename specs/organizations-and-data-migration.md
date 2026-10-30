@@ -1,6 +1,6 @@
 # Spec: Organizations and Existing Data Migration
 
-Status: implementation authorized in chat; local code and verification are in progress. Operational instructions are in [online rollout](../docs/organizations-online.md). No production migration, deployment, credential change, or purge is authorized by this document alone.
+Status: implementation authorized in chat; local implementation and verification are included. Operational instructions are in [online rollout](../docs/organizations-online.md). No production migration, deployment, credential change, or purge is authorized by this document alone.
 
 ## Purpose
 

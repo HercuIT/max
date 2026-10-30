@@ -5,7 +5,9 @@ import pg from 'pg';
 import fs from 'node:fs';
 import assert from 'node:assert/strict';
 import {assertFreshDatabase,setupFixture} from './database-fixture.mjs';
-import {stageOnlineTenancy,verifyLegacyHistory} from './online-tenancy.mjs';
+import {stageOnlineTenancy,verifyLegacyHistory,readStage,stageFiles} from './online-tenancy.mjs';
+const enhancement=fs.readFileSync(new URL('../supabase/migrations/20261030162837_organizations_model_provenance_and_recovery.sql',import.meta.url),'utf8').replace(/\r\n/g,'\n');
+assert(readStage(stageFiles[5]).replace(/\r\n/g,'\n').includes(enhancement),'online and normal paths must include the same appended safety migration verbatim');
 const postgres=process.argv.includes('--postgres');
 if(postgres&&!process.env.TEST_DATABASE_URL)throw new Error('Set TEST_DATABASE_URL to a NEW disposable PostgreSQL database.');
 const engine=postgres?new pg.Client({connectionString:process.env.TEST_DATABASE_URL}):new PGlite();
@@ -17,15 +19,16 @@ try{
   if(!name.startsWith('20261028210000')){await db.query(sql);return;}
   await assert.rejects(verifyLegacyHistory(db),/ledger is missing/);
   await db.query("insert into public.projects(name) values('during-expansion')");
+  await db.query("insert into public.token_usage_logs(project_name,input_tokens) values('default-project',0)");
   await stageOnlineTenancy(db,{through:1});
   await db.query(`set role service_role`);
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens,total_cost_usd) values('during-expansion','claude','claude-3-5-sonnet',3,0.123456)");
   await db.query('reset role');
   assert.equal((await db.query("select model_provenance from public.token_usage_logs where project_name='during-expansion'")).rows[0].model_provenance,'legacy_hardcoded');
-  let writer,writing=true,writeTask,writes=0;
+  let writer,writing=true,writeTask,writerError,writes=0;
   if(postgres){
    writer=new pg.Client({connectionString:process.env.TEST_DATABASE_URL});await writer.connect();await writer.query('set role service_role');
-   writeTask=(async()=>{while(writing&&writes<100){await writer.query("insert into public.token_usage_logs(project_name,source,input_tokens) values('parallel-live','claude',0)");writes++;await new Promise(resolve=>setTimeout(resolve,2));}})();
+   writeTask=(async()=>{while(writing&&writes<100){await writer.query("insert into public.token_usage_logs(project_name,source,input_tokens) values('parallel-live','claude',0)");writes++;await new Promise(resolve=>setTimeout(resolve,2));}})().catch(error=>{writerError=error;});
   }
   try{
   await assert.rejects(stageOnlineTenancy(db,{through:6,batchSize:1,onProgress:message=>{
@@ -35,10 +38,12 @@ try{
   await db.query("insert into public.token_usage_logs(project_name,source,model,input_tokens) values('during-backfill','codex','gpt-reported',4)");
   await db.query('reset role');
   await stageOnlineTenancy(db,{through:6,batchSize:1});
-  }finally{writing=false;if(writeTask)await writeTask;if(writer)await writer.end();}
+  }finally{writing=false;try{if(writeTask)await writeTask;}finally{if(writer)await writer.end();}}
+  if(writerError)throw writerError;
   if(postgres)assert(writes>0,'a separate PostgreSQL connection inserted while backfill/validation/index builds ran');
   assert.equal((await db.query('select sum(input_tokens)::text as n from public.token_usage_logs')).rows[0].n,'16');
   assert.equal((await db.query("select sum(total_cost_usd)::text as n from public.token_usage_logs")).rows[0].n,'0.123456');
+  assert.equal((await db.query("select count(*)::int as n from public.token_usage_logs where project_name='default-project'")).rows[0].n,1);
   await db.query("insert into auth.users(id,email,email_confirmed_at) values('40000000-0000-4000-8000-000000000001','gate@example.test',now())");
   await assert.rejects(db.query("select public.bootstrap_tenant('Too early','40000000-0000-4000-8000-000000000001')"),/admission gate/);
   await db.query('set role service_role');
